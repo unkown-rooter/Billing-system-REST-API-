@@ -1,0 +1,6 @@
+{
+  "name": "Billing System REST API",
+  "description": "A production-grade REST API backend for managing customers, invoices, products, and payments.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
