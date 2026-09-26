@@ -1,15 +1,22 @@
 import { Request, Response, NextFunction } from 'express';
 import { CustomerService } from '../services/customer.service.js';
+import { AuthenticationRequiredError } from '../services/errors.js';
+import { validateCustomerListQuery } from '../validation/query.schema.js';
 
 export class CustomerController {
   constructor(private readonly customerService: CustomerService) {}
 
-  getAll = async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
+  getAll = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const customers = await this.customerService.getAllCustomers();
+      if (!req.user) {
+        throw new AuthenticationRequiredError('Authentication is required');
+      }
+      const query = req.validatedCustomerQuery || validateCustomerListQuery(req.query);
+      const result = await this.customerService.listCustomers(query, req.user);
       res.status(200).json({
         status: 'success',
-        data: customers,
+        data: result.items,
+        pagination: result.pagination,
       });
     } catch (err) {
       next(err);
@@ -18,7 +25,10 @@ export class CustomerController {
 
   getById = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const customer = await this.customerService.getCustomerById(req.params.id);
+      if (!req.user) {
+        throw new AuthenticationRequiredError('Authentication is required');
+      }
+      const customer = await this.customerService.getCustomerById(req.params.id, req.user);
       res.status(200).json({
         status: 'success',
         data: customer,
@@ -30,7 +40,10 @@ export class CustomerController {
 
   create = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const customer = await this.customerService.createCustomer(req.body);
+      if (!req.user) {
+        throw new AuthenticationRequiredError('Authentication is required');
+      }
+      const customer = await this.customerService.createCustomer(req.body, req.user);
       res.status(201)
         .location(`/api/v1/customers/${customer.id}`)
         .json({
@@ -44,7 +57,10 @@ export class CustomerController {
 
   update = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const customer = await this.customerService.updateCustomer(req.params.id, req.body);
+      if (!req.user) {
+        throw new AuthenticationRequiredError('Authentication is required');
+      }
+      const customer = await this.customerService.updateCustomer(req.params.id, req.body, req.user);
       res.status(200).json({
         status: 'success',
         data: customer,
@@ -56,7 +72,10 @@ export class CustomerController {
 
   delete = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      await this.customerService.deleteCustomer(req.params.id);
+      if (!req.user) {
+        throw new AuthenticationRequiredError('Authentication is required');
+      }
+      await this.customerService.deleteCustomer(req.params.id, req.user);
       // HTTP 204 No Content MUST NOT return a message body
       res.status(204).send();
     } catch (err) {

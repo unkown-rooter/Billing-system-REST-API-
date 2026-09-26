@@ -26,11 +26,16 @@ async function startServer(): Promise<void> {
 
   const server = app.listen(PORT, HOST, () => {
     console.log(`===============================================`);
-    console.log(` Billing System REST API running in Phase 2`);
-    console.log(` Persistence: PostgreSQL Database`);
+    console.log(` Billing System REST API running in Phase 9`);
+    console.log(` Domain: Relational Billing + Security Hardening`);
+    console.log(` Security: JWT + RBAC/IDOR + Rate-Limit + Headers`);
     console.log(` Server listening at http://${HOST}:${PORT}`);
     console.log(` Health check: http://${HOST}:${PORT}/api/v1/health`);
+    console.log(` Register:     http://${HOST}:${PORT}/api/v1/auth/register`);
+    console.log(` Login:        http://${HOST}:${PORT}/api/v1/auth/login`);
+    console.log(` Current User: http://${HOST}:${PORT}/api/v1/auth/me`);
     console.log(` Customers:    http://${HOST}:${PORT}/api/v1/customers`);
+    console.log(` Invoices:     http://${HOST}:${PORT}/api/v1/invoices`);
     console.log(`===============================================`);
   });
 

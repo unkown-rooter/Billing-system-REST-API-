@@ -1,4 +1,9 @@
 import { Customer } from '../models/customer.model.js';
+import {
+  CustomerListQuery,
+  PaginatedResult,
+  buildPaginationMeta,
+} from '../models/pagination.model.js';
 import { ICustomerRepository } from './customer.repository.interface.js';
 
 /**
@@ -15,6 +20,57 @@ export class InMemoryCustomerRepository implements ICustomerRepository {
 
   async findAll(): Promise<Customer[]> {
     return Array.from(this.store.values()).map((c) => ({ ...c }));
+  }
+
+  async findByAccountId(accountId: string): Promise<Customer[]> {
+    return Array.from(this.store.values())
+      .filter((c) => c.accountId === accountId)
+      .map((c) => ({ ...c }));
+  }
+
+  async findPaginated(query: CustomerListQuery): Promise<PaginatedResult<Customer>> {
+    let records = Array.from(this.store.values());
+
+    // 1. Authorization Scope First
+    if (query.accountId !== undefined) {
+      records = records.filter((c) => c.accountId === query.accountId);
+    }
+
+    // 2. Domain Filtering
+    if (query.currency !== undefined) {
+      const targetCurrency = query.currency.toUpperCase();
+      records = records.filter((c) => c.currency.toUpperCase() === targetCurrency);
+    }
+    if (query.email !== undefined) {
+      const targetEmail = query.email.toLowerCase().trim();
+      records = records.filter((c) => c.email.toLowerCase().trim() === targetEmail);
+    }
+    if (query.name !== undefined) {
+      const targetName = query.name.toLowerCase();
+      records = records.filter((c) => c.name.toLowerCase().includes(targetName));
+    }
+
+    // 3. Authoritative Filtered Count
+    const total = records.length;
+
+    // 4. Deterministic Sorting (with ID tie-breaker)
+    const dir = query.order === 'desc' ? -1 : 1;
+    records.sort((a, b) => {
+      const valA = a[query.sort];
+      const valB = b[query.sort];
+      if (valA < valB) return -1 * dir;
+      if (valA > valB) return 1 * dir;
+      return a.id.localeCompare(b.id) * dir;
+    });
+
+    // 5. Offset Pagination
+    const offset = (query.page - 1) * query.limit;
+    const paged = records.slice(offset, offset + query.limit).map((c) => ({ ...c }));
+
+    return {
+      items: paged,
+      pagination: buildPaginationMeta(query.page, query.limit, total),
+    };
   }
 
   async findById(id: string): Promise<Customer | null> {
@@ -43,7 +99,7 @@ export class InMemoryCustomerRepository implements ICustomerRepository {
 
   async update(
     id: string,
-    updates: Partial<Omit<Customer, 'id' | 'createdAt'>>
+    updates: Partial<Omit<Customer, 'id' | 'accountId' | 'createdAt'>>
   ): Promise<Customer | null> {
     const existing = this.store.get(id);
     if (!existing) {
@@ -54,6 +110,7 @@ export class InMemoryCustomerRepository implements ICustomerRepository {
       ...existing,
       ...updates,
       id: existing.id,
+      accountId: existing.accountId,
       createdAt: existing.createdAt,
     };
 

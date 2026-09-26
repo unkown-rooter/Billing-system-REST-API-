@@ -12,9 +12,19 @@
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "migrate": "tsx src/api/db/migrate.ts",
-    "test": "tsx src/test/api.test.ts && tsx src/test/validation.test.ts",
+    "test": "tsx src/test/unit/domain-and-services.unit.test.ts && tsx src/test/integration/service-repository.integration.test.ts && tsx src/test/http/http-contracts-and-security.test.ts && tsx src/test/api.test.ts && tsx src/test/validation.test.ts && tsx src/test/auth.test.ts && tsx src/test/authorization.test.ts && tsx src/test/relationships.test.ts && tsx src/test/pagination.test.ts && tsx src/test/security.test.ts",
+    "test:unit": "tsx src/test/unit/domain-and-services.unit.test.ts",
+    "test:service-integration": "tsx src/test/integration/service-repository.integration.test.ts",
+    "test:http": "tsx src/test/http/http-contracts-and-security.test.ts",
+    "test:api": "tsx src/test/api.test.ts",
+    "test:auth": "tsx src/test/auth.test.ts",
+    "test:authorization": "tsx src/test/authorization.test.ts",
+    "test:relationships": "tsx src/test/relationships.test.ts",
+    "test:pagination": "tsx src/test/pagination.test.ts",
+    "test:security": "tsx src/test/security.test.ts",
     "test:validation": "tsx src/test/validation.test.ts",
-    "test:integration": "tsx src/test/postgres.test.ts"
+    "test:integration": "tsx src/test/postgres.test.ts",
+    "test:all": "npm test && npm run test:integration"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

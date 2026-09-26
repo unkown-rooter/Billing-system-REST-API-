@@ -9,15 +9,20 @@ export const CUSTOMER_ID_REGEX = /^cus_[a-zA-Z0-9_-]+$/;
 
 const ALLOWED_CREATE_FIELDS = new Set(['name', 'email', 'currency']);
 const ALLOWED_UPDATE_FIELDS = new Set(['name', 'email', 'currency']);
-const IMMUTABLE_UPDATE_FIELDS = new Set(['id', 'createdAt']);
+const IMMUTABLE_UPDATE_FIELDS = new Set(['id', 'createdAt', 'accountId']);
+const FORBIDDEN_PROTO_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function containsNullByte(val: string): boolean {
+  return val.includes('\u0000');
+}
 
 /**
  * Validates and normalizes customer creation request bodies.
  * Strictly enforces schema contracts:
  * - Reject non-object shapes (null, array, primitive)
  * - Require name, email, currency
- * - Reject unknown properties (e.g. isAdmin)
- * - Enforce length, type, and format constraints
+ * - Reject unknown properties (e.g. isAdmin) and prototype-pollution keys
+ * - Enforce length, type, null-byte, and format constraints
  */
 export function validateCreateCustomerBody(body: unknown): CreateCustomerDTO {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
@@ -27,9 +32,9 @@ export function validateCreateCustomerBody(body: unknown): CreateCustomerDTO {
   const record = body as Record<string, unknown>;
   const fieldErrors: ValidationErrorField[] = [];
 
-  // 1. Detect unknown / unrecognized fields
-  for (const key of Object.keys(record)) {
-    if (!ALLOWED_CREATE_FIELDS.has(key)) {
+  // 1. Detect unknown / unrecognized fields & prototype pollution keys
+  for (const key of Object.getOwnPropertyNames(record)) {
+    if (FORBIDDEN_PROTO_KEYS.has(key) || !ALLOWED_CREATE_FIELDS.has(key)) {
       fieldErrors.push({
         field: key,
         message: `Unknown field '${key}' is not permitted`,
@@ -47,6 +52,11 @@ export function validateCreateCustomerBody(body: unknown): CreateCustomerDTO {
     fieldErrors.push({
       field: 'name',
       message: "Field 'name' must be a string",
+    });
+  } else if (containsNullByte(record.name)) {
+    fieldErrors.push({
+      field: 'name',
+      message: "Field 'name' contains invalid control characters",
     });
   } else if (record.name.trim().length === 0) {
     fieldErrors.push({
@@ -70,6 +80,11 @@ export function validateCreateCustomerBody(body: unknown): CreateCustomerDTO {
     fieldErrors.push({
       field: 'email',
       message: "Field 'email' must be a string",
+    });
+  } else if (containsNullByte(record.email)) {
+    fieldErrors.push({
+      field: 'email',
+      message: "Field 'email' contains invalid control characters",
     });
   } else {
     const trimmedEmail = record.email.trim();
@@ -133,7 +148,7 @@ export function validateUpdateCustomerBody(body: unknown): UpdateCustomerDTO {
   }
 
   const record = body as Record<string, unknown>;
-  const keys = Object.keys(record);
+  const keys = Object.getOwnPropertyNames(record);
 
   if (keys.length === 0) {
     throw new ValidationError('Update payload cannot be empty. At least one mutable field must be provided');
@@ -143,7 +158,7 @@ export function validateUpdateCustomerBody(body: unknown): UpdateCustomerDTO {
 
   // 1. Check for immutable fields
   for (const immutableKey of IMMUTABLE_UPDATE_FIELDS) {
-    if (immutableKey in record) {
+    if (Object.prototype.hasOwnProperty.call(record, immutableKey)) {
       fieldErrors.push({
         field: immutableKey,
         message: `Field '${immutableKey}' is immutable and cannot be updated`,
@@ -151,9 +166,12 @@ export function validateUpdateCustomerBody(body: unknown): UpdateCustomerDTO {
     }
   }
 
-  // 2. Check for unknown fields
+  // 2. Check for unknown fields & prototype pollution keys
   for (const key of keys) {
-    if (!ALLOWED_UPDATE_FIELDS.has(key) && !IMMUTABLE_UPDATE_FIELDS.has(key)) {
+    if (
+      FORBIDDEN_PROTO_KEYS.has(key) ||
+      (!ALLOWED_UPDATE_FIELDS.has(key) && !IMMUTABLE_UPDATE_FIELDS.has(key))
+    ) {
       fieldErrors.push({
         field: key,
         message: `Unknown field '${key}' is not permitted`,
@@ -167,6 +185,11 @@ export function validateUpdateCustomerBody(body: unknown): UpdateCustomerDTO {
       fieldErrors.push({
         field: 'name',
         message: "Field 'name' must be a string",
+      });
+    } else if (containsNullByte(record.name)) {
+      fieldErrors.push({
+        field: 'name',
+        message: "Field 'name' contains invalid control characters",
       });
     } else if (record.name.trim().length === 0) {
       fieldErrors.push({
@@ -187,6 +210,11 @@ export function validateUpdateCustomerBody(body: unknown): UpdateCustomerDTO {
       fieldErrors.push({
         field: 'email',
         message: "Field 'email' must be a string",
+      });
+    } else if (containsNullByte(record.email)) {
+      fieldErrors.push({
+        field: 'email',
+        message: "Field 'email' contains invalid control characters",
       });
     } else {
       const trimmedEmail = record.email.trim();

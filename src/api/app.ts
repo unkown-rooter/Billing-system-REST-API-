@@ -1,39 +1,122 @@
 import express, { Express, Request, Response } from 'express';
 import { errorHandler } from './middlewares/error-handler.middleware.js';
 import { requestLogger } from './middlewares/request-logger.middleware.js';
+import {
+  createSecurityHeadersMiddleware,
+  SecurityHeadersOptions,
+} from './middlewares/security-headers.middleware.js';
+import {
+  createCorsMiddleware,
+  CorsPolicyOptions,
+} from './middlewares/cors.middleware.js';
+import {
+  createAuthRateLimiter,
+  createApiRateLimiter,
+  RateLimitOptions,
+} from './middlewares/rate-limit.middleware.js';
 import { ICustomerRepository } from './repositories/customer.repository.interface.js';
 import { PostgresCustomerRepository } from './repositories/postgres-customer.repository.js';
+import { InMemoryCustomerRepository } from './repositories/in-memory-customer.repository.js';
+import { IAccountRepository } from './repositories/account.repository.interface.js';
+import { PostgresAccountRepository } from './repositories/postgres-account.repository.js';
+import { InMemoryAccountRepository } from './repositories/in-memory-account.repository.js';
+import { IInvoiceRepository } from './repositories/invoice.repository.interface.js';
+import { PostgresInvoiceRepository } from './repositories/postgres-invoice.repository.js';
+import { InMemoryInvoiceRepository } from './repositories/in-memory-invoice.repository.js';
 import { getPool } from './db/pool.js';
 import { CustomerService } from './services/customer.service.js';
 import { CustomerController } from './controllers/customer.controller.js';
+import { InvoiceService } from './services/invoice.service.js';
+import { InvoiceController } from './controllers/invoice.controller.js';
 import { HealthController } from './controllers/health.controller.js';
+import { PasswordService } from './services/password.service.js';
+import { TokenService } from './services/token.service.js';
+import { AuthService } from './services/auth.service.js';
+import { AuthController } from './controllers/auth.controller.js';
+import { createAuthMiddleware } from './middlewares/auth.middleware.js';
 import { createV1Router } from './routes/index.js';
 
 export interface AppDependencies {
   customerRepository?: ICustomerRepository;
+  accountRepository?: IAccountRepository;
+  invoiceRepository?: IInvoiceRepository;
   healthController?: HealthController;
+  authController?: AuthController;
+  authService?: AuthService;
+  passwordService?: PasswordService;
+  tokenService?: TokenService;
+  protectCustomerDelete?: boolean;
+  securityHeadersOptions?: SecurityHeadersOptions;
+  corsOptions?: CorsPolicyOptions;
+  authRateLimitOptions?: Partial<RateLimitOptions>;
+  apiRateLimitOptions?: Partial<RateLimitOptions>;
 }
 
 export function createApp(deps: AppDependencies = {}): Express {
   const app = express();
 
-  // 1. Security Hardening
+  // 1. Security Hardening & HTTP Headers
   app.disable('x-powered-by');
+  app.use(createSecurityHeadersMiddleware(deps.securityHeadersOptions));
+  app.use(createCorsMiddleware(deps.corsOptions));
 
-  // 2. Global Middleware
+  // 2. Global Middleware (Bounded JSON Parser & Redacted Request Logger)
   app.use(express.json({ limit: '100kb', strict: false }));
   app.use(requestLogger);
 
   // 3. Dependency Wiring (Inversion of Control)
-  // Production default: PostgresCustomerRepository backed by the PostgreSQL connection pool.
-  const customerRepo = deps.customerRepository || new PostgresCustomerRepository(getPool());
-  const customerService = new CustomerService(customerRepo);
+  const isPostgres = Boolean(process.env.DATABASE_URL);
+
+  // Customer & Invoice Relational Persistence
+  const customerRepo =
+    deps.customerRepository ||
+    (isPostgres ? new PostgresCustomerRepository(getPool()) : new InMemoryCustomerRepository());
+
+  const invoiceRepo =
+    deps.invoiceRepository ||
+    (customerRepo instanceof InMemoryCustomerRepository
+      ? new InMemoryInvoiceRepository(customerRepo)
+      : isPostgres
+        ? new PostgresInvoiceRepository(getPool())
+        : new InMemoryInvoiceRepository(customerRepo));
+
+  const customerService = new CustomerService(customerRepo, invoiceRepo);
   const customerController = new CustomerController(customerService);
-  const healthController = deps.healthController || new HealthController();
+
+  const invoiceService = new InvoiceService(invoiceRepo, customerRepo);
+  const invoiceController = new InvoiceController(invoiceService);
+
+  // Authentication & Identity Wiring
+  const accountRepo =
+    deps.accountRepository ||
+    (isPostgres ? new PostgresAccountRepository(getPool()) : new InMemoryAccountRepository());
+  const passwordService = deps.passwordService || new PasswordService();
+  const tokenService = deps.tokenService || new TokenService();
+  const authService = deps.authService || new AuthService(accountRepo, passwordService, tokenService);
+  const authController = deps.authController || new AuthController(authService);
+  const authenticate = createAuthMiddleware(tokenService);
+
+  // Rate Limiters (Brute-Force Auth Limiter + General API Flood Limiter)
+  const authRateLimiter = createAuthRateLimiter(deps.authRateLimitOptions);
+  const apiRateLimiter = createApiRateLimiter(deps.apiRateLimitOptions);
+
+  // Health Diagnostics
+  const healthController =
+    deps.healthController ||
+    (customerRepo instanceof InMemoryCustomerRepository
+      ? new HealthController(async () => true)
+      : new HealthController());
 
   // 4. API Versioning Router: /api/v1
-  const v1Router = createV1Router(customerController, healthController);
-  app.use('/api/v1', v1Router);
+  const v1Router = createV1Router({
+    customerController,
+    invoiceController,
+    healthController,
+    authController,
+    authenticate,
+    authRateLimiter,
+  });
+  app.use('/api/v1', apiRateLimiter, v1Router);
 
   // 5. API 404 Handler for undefined API routes
   app.all(['/api', '/api/*'], (req: Request, res: Response) => {

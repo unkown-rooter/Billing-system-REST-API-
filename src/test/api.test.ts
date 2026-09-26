@@ -3,15 +3,41 @@ import assert from 'node:assert/strict';
 import { Server } from 'node:http';
 import { createApp } from '../api/app.js';
 import { InMemoryCustomerRepository } from '../api/repositories/in-memory-customer.repository.js';
+import { InMemoryAccountRepository } from '../api/repositories/in-memory-account.repository.js';
+import { TokenService } from '../api/services/token.service.js';
 import { closePool } from '../api/db/pool.js';
 
 describe('Billing System REST API - Phase 1 Test Suite', () => {
   let server: Server;
   let baseUrl: string;
+  let authHeader: Record<string, string>;
+  const adminAccountId = 'acc_phase1_test_admin';
 
   before(async () => {
+    const accountRepo = new InMemoryAccountRepository();
+    const tokenService = new TokenService();
+    const now = new Date().toISOString();
+
+    await accountRepo.create({
+      id: adminAccountId,
+      email: 'admin@phase1test.com',
+      passwordHash: 'scrypt$N=16384,r=8,p=1$00000000000000000000000000000000$00',
+      role: 'admin',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const token = tokenService.generateToken({
+      id: adminAccountId,
+      email: 'admin@phase1test.com',
+      role: 'admin',
+    });
+    authHeader = { Authorization: `Bearer ${token}` };
+
     const app = createApp({
       customerRepository: new InMemoryCustomerRepository(),
+      accountRepository: accountRepo,
+      tokenService,
     });
     await new Promise<void>((resolve) => {
       // Listen on port 0 to bind to an available ephemeral port
@@ -47,7 +73,9 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
 
   describe('2. Customer Listing (Initial Empty State)', () => {
     it('GET /api/v1/customers returns 200 with an empty array when no customers exist', async () => {
-      const res = await fetch(`${baseUrl}/api/v1/customers`);
+      const res = await fetch(`${baseUrl}/api/v1/customers`, {
+        headers: authHeader,
+      });
       assert.equal(res.status, 200);
 
       const json = await res.json();
@@ -67,7 +95,7 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
 
       const res = await fetch(`${baseUrl}/api/v1/customers`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify(payload),
       });
 
@@ -79,6 +107,7 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
       const json = await res.json();
       assert.equal(json.status, 'success');
       assert.match(json.data.id, /^cus_/);
+      assert.equal(json.data.accountId, adminAccountId);
       assert.equal(json.data.name, 'Stark Enterprises');
       assert.equal(json.data.email, 'billing@starkenterprises.com');
       assert.equal(json.data.currency, 'USD');
@@ -90,7 +119,7 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
     it('POST /api/v1/customers fails (400) when name is missing or whitespace only', async () => {
       const res = await fetch(`${baseUrl}/api/v1/customers`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({ name: '   ', email: 'test@example.com' }),
       });
 
@@ -103,7 +132,7 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
     it('POST /api/v1/customers fails (400) when email format is invalid', async () => {
       const res = await fetch(`${baseUrl}/api/v1/customers`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({ name: 'Invalid Email Corp', email: 'not-an-email' }),
       });
 
@@ -116,7 +145,7 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
     it('POST /api/v1/customers fails (400) when currency is not a 3-letter ISO code', async () => {
       const res = await fetch(`${baseUrl}/api/v1/customers`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({ name: 'Bad Currency LLC', email: 'currency@bad.com', currency: 'US' }),
       });
 
@@ -130,7 +159,7 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
       // First customer was billing@starkenterprises.com
       const res = await fetch(`${baseUrl}/api/v1/customers`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({
           name: 'Stark Copy',
           email: 'BILLING@STARKENTERPRISES.COM',
@@ -147,11 +176,15 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
 
   describe('4. Customer Retrieval', () => {
     it('GET /api/v1/customers/:id retrieves existing customer by ID', async () => {
-      const listRes = await fetch(`${baseUrl}/api/v1/customers`);
+      const listRes = await fetch(`${baseUrl}/api/v1/customers`, {
+        headers: authHeader,
+      });
       const listJson = await listRes.json();
       const existingId = listJson.data[0].id;
 
-      const res = await fetch(`${baseUrl}/api/v1/customers/${existingId}`);
+      const res = await fetch(`${baseUrl}/api/v1/customers/${existingId}`, {
+        headers: authHeader,
+      });
       assert.equal(res.status, 200);
 
       const json = await res.json();
@@ -161,7 +194,9 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
     });
 
     it('GET /api/v1/customers/:id returns 404 for nonexistent customer', async () => {
-      const res = await fetch(`${baseUrl}/api/v1/customers/cus_nonexistent_id_999`);
+      const res = await fetch(`${baseUrl}/api/v1/customers/cus_nonexistent_id_999`, {
+        headers: authHeader,
+      });
       assert.equal(res.status, 404);
 
       const json = await res.json();
@@ -172,7 +207,9 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
 
   describe('5. Customer Update (PATCH)', () => {
     it('PATCH /api/v1/customers/:id updates valid fields, refreshes updatedAt, and preserves createdAt & id', async () => {
-      const listRes = await fetch(`${baseUrl}/api/v1/customers`);
+      const listRes = await fetch(`${baseUrl}/api/v1/customers`, {
+        headers: authHeader,
+      });
       const listJson = await listRes.json();
       const target = listJson.data[0];
 
@@ -181,7 +218,7 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
 
       const res = await fetch(`${baseUrl}/api/v1/customers/${target.id}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({
           name: 'Stark Global Enterprises',
           currency: 'EUR',
@@ -199,13 +236,15 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
     });
 
     it('PATCH /api/v1/customers/:id fails (400) when attempting to modify immutable fields (id, createdAt)', async () => {
-      const listRes = await fetch(`${baseUrl}/api/v1/customers`);
+      const listRes = await fetch(`${baseUrl}/api/v1/customers`, {
+        headers: authHeader,
+      });
       const listJson = await listRes.json();
       const target = listJson.data[0];
 
       const res = await fetch(`${baseUrl}/api/v1/customers/${target.id}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({
           name: 'Forbidden Update',
           id: 'cus_attempt_to_override_id',
@@ -224,13 +263,15 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
     });
 
     it('PATCH /api/v1/customers/:id fails (400) when unknown fields are provided', async () => {
-      const listRes = await fetch(`${baseUrl}/api/v1/customers`);
+      const listRes = await fetch(`${baseUrl}/api/v1/customers`, {
+        headers: authHeader,
+      });
       const listJson = await listRes.json();
       const target = listJson.data[0];
 
       const res = await fetch(`${baseUrl}/api/v1/customers/${target.id}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({
           name: 'Valid Name',
           isAdmin: true,
@@ -246,13 +287,15 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
     });
 
     it('PATCH /api/v1/customers/:id fails (400) if update payload is empty', async () => {
-      const listRes = await fetch(`${baseUrl}/api/v1/customers`);
+      const listRes = await fetch(`${baseUrl}/api/v1/customers`, {
+        headers: authHeader,
+      });
       const listJson = await listRes.json();
       const target = listJson.data[0];
 
       const res = await fetch(`${baseUrl}/api/v1/customers/${target.id}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({}),
       });
 
@@ -265,7 +308,7 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
     it('PATCH /api/v1/customers/:id returns 404 for nonexistent customer', async () => {
       const res = await fetch(`${baseUrl}/api/v1/customers/cus_ghost_customer`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({ name: 'Ghost' }),
       });
 
@@ -278,12 +321,15 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
 
   describe('6. Customer Deletion', () => {
     it('DELETE /api/v1/customers/:id deletes existing customer and returns 204 No Content', async () => {
-      const listRes = await fetch(`${baseUrl}/api/v1/customers`);
+      const listRes = await fetch(`${baseUrl}/api/v1/customers`, {
+        headers: authHeader,
+      });
       const listJson = await listRes.json();
       const target = listJson.data[0];
 
       const res = await fetch(`${baseUrl}/api/v1/customers/${target.id}`, {
         method: 'DELETE',
+        headers: authHeader,
       });
 
       assert.equal(res.status, 204);
@@ -291,11 +337,15 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
       assert.equal(bodyText, ''); // 204 MUST have no body
 
       // Verify customer can no longer be retrieved
-      const getRes = await fetch(`${baseUrl}/api/v1/customers/${target.id}`);
+      const getRes = await fetch(`${baseUrl}/api/v1/customers/${target.id}`, {
+        headers: authHeader,
+      });
       assert.equal(getRes.status, 404);
 
       // Verify customer list is now empty again
-      const verifyListRes = await fetch(`${baseUrl}/api/v1/customers`);
+      const verifyListRes = await fetch(`${baseUrl}/api/v1/customers`, {
+        headers: authHeader,
+      });
       const verifyListJson = await verifyListRes.json();
       assert.equal(verifyListJson.data.length, 0);
     });
@@ -303,6 +353,7 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
     it('DELETE /api/v1/customers/:id returns 404 for nonexistent customer', async () => {
       const res = await fetch(`${baseUrl}/api/v1/customers/cus_nonexistent_delete`, {
         method: 'DELETE',
+        headers: authHeader,
       });
 
       assert.equal(res.status, 404);
@@ -325,7 +376,7 @@ describe('Billing System REST API - Phase 1 Test Suite', () => {
     it('POST with malformed JSON body returns 400 with MALFORMED_JSON code', async () => {
       const res = await fetch(`${baseUrl}/api/v1/customers`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeader },
         body: '{"name": "broken-json,',
       });
 

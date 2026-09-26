@@ -1,5 +1,6 @@
 import pg from 'pg';
 import 'dotenv/config';
+import { redactSensitiveText } from '../security/redaction.js';
 
 const { Pool } = pg;
 
@@ -32,7 +33,7 @@ export function getPool(customConfig?: PoolConfig): pg.Pool {
     });
 
     activePool.on('error', (err: Error) => {
-      console.error('[DATABASE POOL] Unexpected error on idle client:', err.message);
+      console.error('[DATABASE POOL] Unexpected error on idle client:', redactSensitiveText(err.message));
     });
   }
 
@@ -55,7 +56,7 @@ export async function testConnection(poolInstance?: pg.Pool): Promise<boolean> {
     }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
-    console.error('[DATABASE] Connectivity check failed:', errorMessage);
+    console.error('[DATABASE] Connectivity check failed:', redactSensitiveText(errorMessage));
     return false;
   }
 }
