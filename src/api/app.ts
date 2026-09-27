@@ -35,6 +35,7 @@ import { AuthService } from './services/auth.service.js';
 import { AuthController } from './controllers/auth.controller.js';
 import { createAuthMiddleware } from './middlewares/auth.middleware.js';
 import { createV1Router } from './routes/index.js';
+import { SecurityConfigurationError } from './services/errors.js';
 
 export interface AppDependencies {
   customerRepository?: ICustomerRepository;
@@ -55,8 +56,15 @@ export interface AppDependencies {
 export function createApp(deps: AppDependencies = {}): Express {
   const app = express();
 
-  // 1. Security Hardening & HTTP Headers
+  // 1. Reverse Proxy & Security Hardening
   app.disable('x-powered-by');
+  if (
+    process.env.NODE_ENV === 'production' ||
+    process.env.TRUST_PROXY === 'true' ||
+    process.env.TRUST_PROXY === '1'
+  ) {
+    app.set('trust proxy', 1);
+  }
   app.use(createSecurityHeadersMiddleware(deps.securityHeadersOptions));
   app.use(createCorsMiddleware(deps.corsOptions));
 
@@ -65,7 +73,16 @@ export function createApp(deps: AppDependencies = {}): Express {
   app.use(requestLogger);
 
   // 3. Dependency Wiring (Inversion of Control)
-  const isPostgres = Boolean(process.env.DATABASE_URL);
+  const isPostgres = Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim().length > 0);
+  if (
+    process.env.NODE_ENV === 'production' &&
+    !deps.customerRepository &&
+    !isPostgres
+  ) {
+    throw new SecurityConfigurationError(
+      'Production security error: DATABASE_URL environment variable must be explicitly set in production'
+    );
+  }
 
   // Customer & Invoice Relational Persistence
   const customerRepo =

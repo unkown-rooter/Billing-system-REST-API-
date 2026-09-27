@@ -10,6 +10,7 @@ import { InMemoryInvoiceRepository } from '../../api/repositories/in-memory-invo
 import { PasswordService } from '../../api/services/password.service.js';
 import { TokenService } from '../../api/services/token.service.js';
 import { AuthService } from '../../api/services/auth.service.js';
+import { closePool } from '../../api/db/pool.js';
 
 /**
  * Controlled Test Fixtures & Harness Factory (Phase 8)
@@ -216,6 +217,7 @@ export async function createIsolatedHttpHarness(): Promise<TestHttpHarness> {
     await new Promise<void>((resolve) => {
       server.close(() => resolve());
     });
+    await closePool();
   };
 
   return {

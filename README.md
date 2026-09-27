@@ -157,36 +157,68 @@ npm run migrate
 ## 7. Running the Application
 
 ### Development Server
-Starts the Express server with live reload:
+Starts the Express + Vite server in development mode:
 ```bash
 npm run dev
 ```
 
-### Production Build & Execution
+### Production Build & Execution (Compiled JavaScript)
+Compiles the frontend assets (`dist/`) and backend server (`dist-server/`), applies database migrations, and starts the production Node.js server:
 ```bash
 npm run build
-npm start
+npm run migrate:prod
+npm run start:prod
+```
+
+### Docker & Docker Compose (Phase 10 Container Runtime)
+Build and run the multi-stage production container image with an external PostgreSQL 15 container:
+```bash
+# Start PostgreSQL 15 + API container stack via Docker Compose
+docker compose up --build -d
+
+# Apply migrations inside the running API container
+docker compose exec api node dist-server/src/api/db/migrate.js
+
+# Check container health
+curl -i http://localhost:3000/api/v1/health
 ```
 
 ---
 
 ## 8. Verification & Testing
 
-### 1. TypeScript Verification
+### 1. TypeScript Verification (Client & Server)
 ```bash
-npm run typecheck
+npm run lint
 ```
 
-### 2. Phase 1 Service Tests (In-Memory Isolation)
-Verifies HTTP endpoints, request envelopes, and validations using an isolated in-memory repository:
+### 2. Fast Layered Test Pyramid (Phases 1–9 Unit, Service-Repo & HTTP Suites)
+Runs isolated unit tests, service-repository transaction tests, HTTP contract & security header tests, validation, authentication, authorization, relationships, pagination, and security hardening suites:
 ```bash
 npm test
 ```
 
-### 3. Phase 2 PostgreSQL Integration Tests
-Verifies real PostgreSQL database connectivity, schema migrations, constraints, unique indexes, process restart durability, and truthful degraded health reporting:
+### 3. Live PostgreSQL Integration Tests
+Verifies real PostgreSQL 15 database connectivity, schema migrations (`001`–`005`), constraints, unique indexes, process restart durability, and test DB isolation (`billing_system_test` ≠ `billing_system`):
 ```bash
 npm run test:integration
+```
+
+### 4. Phase 10 Container Runtime & Production Artifact Tests
+Verifies the multi-stage `Dockerfile`, `.dockerignore`, compiled `dist-server/server.js` execution as non-root `node` user on a read-only root filesystem, PostgreSQL persistence across container replacement, `SIGTERM` graceful shutdown, and fail-closed production secret checks:
+```bash
+npm run test:docker
+```
+
+### 5. Phase 11 Production Deployment & Live Hosting Verification Tests
+Verifies the Google Cloud Run declarative service manifest (`cloudrun.service.yaml`), release script (`scripts/deploy-release.sh`), strict three-way PostgreSQL database separation (`billing_system` ≠ `billing_system_test` ≠ `billing_system_prod`), production migration idempotency, fail-closed `DATABASE_URL` and `JWT_SECRET` startup enforcement, HTTPS/TLS termination (`Strict-Transport-Security`), live API workflows, and persistence across container restart:
+```bash
+npm run test:deploy
+```
+
+### 6. Full Test Pyramid (Phases 1–11: 212 Tests Across 13 Suites)
+```bash
+npm run test:all
 ```
 
 ---
@@ -216,13 +248,21 @@ npm run test:integration
 }
 ```
 
-Standard error codes:
+Standard error codes across Phases 1–10:
 - `VALIDATION_ERROR` (HTTP 400)
 - `MALFORMED_JSON` (HTTP 400)
+- `AUTHENTICATION_REQUIRED` (HTTP 401)
+- `INVALID_CREDENTIALS` (HTTP 401)
+- `INVALID_TOKEN` (HTTP 401)
+- `TOKEN_EXPIRED` (HTTP 401)
+- `FORBIDDEN` (HTTP 403)
 - `RESOURCE_NOT_FOUND` (HTTP 404)
 - `ROUTE_NOT_FOUND` (HTTP 404)
+- `METHOD_NOT_ALLOWED` (HTTP 405)
 - `DUPLICATE_RESOURCE` (HTTP 409)
+- `CONFLICT` (HTTP 409)
 - `PAYLOAD_TOO_LARGE` (HTTP 413)
+- `RATE_LIMIT_EXCEEDED` (HTTP 429)
 - `INTERNAL_SERVER_ERROR` (HTTP 500)
 
 ---
@@ -1064,6 +1104,144 @@ Phase 9 hardens the Billing System REST API against concrete application-level t
 1. **Process-Local Rate Limiting:** Rate limit counters reside in process memory (`Map`). In a multi-instance horizontal deployment (Phase 13), limits apply per Node.js process unless backed by a shared store or upstream reverse proxy.
 2. **Stateless JWT Revocation:** Stateless JWTs remain valid until `exp` unless signing keys are rotated. Short expiration windows (`JWT_EXPIRES_IN`) are recommended in production.
 3. **TLS Termination:** HTTPS/TLS termination is assumed to be handled by the reverse proxy or cloud load balancer in production deployments.
+
+---
+
+## 20. Phase 10 Architecture: Docker & Containerization
+
+Phase 10 packages the Billing System REST API into a reproducible, minimal, non-root production container image while keeping PostgreSQL stateful storage strictly externalized.
+
+### 1. Containerization Architecture
+
+```
++-----------------------------------------------------------------------+
+| Docker Bridge Network (billing_net)                                   |
+|                                                                       |
+|  +---------------------------------+     TCP :5432 (pg.Pool)          |
+|  | API Container (Stateless)       | ------------------------------>  |
+|  | Image: node:22-bookworm-slim    |                                  |
+|  | User:  node (UID 1000, non-root)|     +-------------------------+  |
+|  | Rootfs: read-only (/tmp tmpfs)  |     | PostgreSQL 15 Container |  |
+|  | Entry: node dist-server/server.js|    | Image: postgres:15      |  |
+|  | Health: GET /api/v1/health      |     | Volume: billing_pgdata  |  |
+|  +---------------------------------+     +-------------------------+  |
++-----------------------------------------------------------------------+
+```
+
+### 2. Multi-Stage `Dockerfile` Design
+
+| Stage | Base Image | Responsibilities | Excluded from Final Image |
+|---|---|---|---|
+| **Stage 1: `builder`** | `node:22-bookworm-slim` | Installs full dependencies (including `devDependencies`), runs `npm run lint` (`tsc --noEmit` + `tsc -p tsconfig.server.json --noEmit`), and runs `npm run build` (`vite build` → `dist/` and `tsc -p tsconfig.server.json` → `dist-server/`). | TypeScript compiler (`typescript`), `tsx`, `esbuild`, `@types/*`, raw `.ts`/`.tsx` source files, and test suites. |
+| **Stage 2: `runtime`** | `node:22-bookworm-slim` | Installs production-only dependencies (`npm install --omit=dev`), copies compiled `dist/`, `dist-server/`, `migrations/*.sql`, and `.env.example`, switches to `USER node` (UID 1000), configures `HEALTHCHECK`, and launches `CMD ["node", "dist-server/server.js"]`. | `.env` secrets, `.git` history, `src/`, `tsconfig*.json`, `Dockerfile`, and npm cache. |
+
+### 3. Production Server Compilation (`tsconfig.server.json`)
+- Compiles `server.ts` and `src/api/**/*.ts` to native ES2022 NodeNext JavaScript under `dist-server/`.
+- In `NODE_ENV=production`, `server.ts` skips loading Vite dev middleware completely and serves compiled static assets from `dist/` alongside `/api/v1/*` REST endpoints.
+- `dist-server/src/api/db/migrate.js` executes versioned SQL migrations (`001`–`005`) using pure Node.js without requiring `tsx` or `typescript` in the production container.
+
+### 4. Container Security & Lifecycle Guarantees
+1. **Non-Root Execution (`USER node`):** The container process runs as UID `1000` (`node`), preventing container root privilege escalation.
+2. **Read-Only Root Filesystem:** Compatible with `read_only: true` (`--read-only --tmpfs /tmp`) in `docker-compose.yml` and Kubernetes/Cloud Run.
+3. **Zero Baked-In Secrets:** `.dockerignore` blocks `.env` and `.env.*` (except `.env.example`) from entering the build context. `DATABASE_URL` and `JWT_SECRET` are injected strictly at runtime.
+4. **Fail-Closed Startup:** Starting the production container in `NODE_ENV=production` without a valid `JWT_SECRET` (>= 32 chars) immediately fails closed with a non-zero exit code.
+5. **PID 1 Signal Handling & Graceful Shutdown:** `CMD ["node", "dist-server/server.js"]` uses exec form so `node` runs as PID 1, catches `SIGTERM`/`SIGINT`, stops accepting new HTTP connections, drains `pg.Pool`, and exits cleanly with code `0`.
+
+### 5. Docker & Compose Commands
+
+```bash
+# 1. Build production container image directly
+docker build -t billing-system-api:phase10 .
+
+# 2. Run migrations using compiled production runner
+docker run --rm \
+  --network billing_net \
+  -e DATABASE_URL="postgresql://postgres:postgres_local_dev_only@postgres:5432/billing_system" \
+  billing-system-api:phase10 \
+  node dist-server/src/api/db/migrate.js
+
+# 3. Run stateless API container with injected runtime configuration
+docker run -d \
+  --name billing-api \
+  --network billing_net \
+  --read-only \
+  --tmpfs /tmp \
+  -p 3000:3000 \
+  -e NODE_ENV="production" \
+  -e PORT="3000" \
+  -e DATABASE_URL="postgresql://postgres:postgres_local_dev_only@postgres:5432/billing_system" \
+  -e JWT_SECRET="replace-with-32-byte-minimum-cryptographic-secret-key" \
+  billing-system-api:phase10
+
+# 4. Or orchestrate local API + PostgreSQL 15 together via Docker Compose
+docker compose up --build -d
+docker compose ps
+docker compose logs -f api
+docker compose down
+```
+
+---
+
+## 21. Phase 11 Architecture: Production Deployment & Cloud Hosting
+
+Phase 11 deploys the containerized Billing System REST API to **Google Cloud Run** (`europe-west2`) backed by a dedicated **PostgreSQL 15 production database (`billing_system_prod`)**.
+
+### 1. Selected Deployment Platform: Google Cloud Run
+
+Google Cloud Run (`serving.knative.dev/v1`) was selected as the single authoritative hosting target because:
+1. **Native OCI/Docker Container Execution:** Runs the exact Phase 10 multi-stage `Dockerfile` (`runtime` stage, Node.js 22 slim, compiled `dist-server/server.js`, non-root `USER node` UID 1000, read-only root filesystem) without architectural modifications.
+2. **Managed TLS/HTTPS Termination:** Automatically provisions and renews TLS certificates on `.run.app` domains, terminating HTTPS at the Google Front End (GFE) edge and forwarding `X-Forwarded-Proto: https` and `X-Forwarded-For` to the container (`TRUST_PROXY=1`).
+3. **Runtime Secret Injection:** Injects `DATABASE_URL` and `JWT_SECRET` at container runtime from Secret Manager (`secretKeyRef`), keeping zero credentials in Git or Docker image layers.
+4. **Truthful HTTP + PostgreSQL Probes:** Configures `startupProbe` and `livenessProbe` against `GET /api/v1/health`, which executes a live `SELECT 1` query against PostgreSQL (`200 OK` when healthy, `503 Service Unavailable` when degraded).
+5. **Immutable Revision Rollback:** Every deployment produces an immutable revision (`K_REVISION`), allowing instant zero-downtime traffic rollback if a deployment fails verification.
+
+### 2. Three-Way PostgreSQL Database Separation
+
+Production data is strictly isolated from local development and automated test databases (`assertSafeProductionDatabaseUrl` in `src/api/db/pool.ts`):
+
+| Environment | Database Name | Purpose & Safety Guarantees |
+|---|---|---|
+| **Development** | `billing_system` | Local interactive development (`npm run dev`). Never used by automated test `TRUNCATE` fixtures or production traffic. |
+| **Automated Test** | `billing_system_test` | Isolated integration & container runtime testing (`npm run test:integration`, `npm run test:docker`). Enforced by `assertSafeTestDatabaseUrl` (must end with `_test`). |
+| **Production** | `billing_system_prod` | Live production persistence (`npm run deploy:release`, `npm run start:prod`). Enforced by `assertSafeProductionDatabaseUrl` (rejects `*_test` and `billing_system`, never touched by test `TRUNCATE` fixtures). |
+
+### 3. Production Environment Variable Inventory
+
+| Variable | Category | Required in Prod | Default | Purpose |
+|---|---|---|---|---|
+| `DATABASE_URL` | **Secret** | **Yes** (Fails closed if missing) | — | PostgreSQL connection URI (`postgresql://<user>:<password>@<host>:5432/billing_system_prod`). |
+| `JWT_SECRET` | **Secret** | **Yes** (Fails closed if `< 32` chars or placeholder) | — | High-entropy cryptographic HMAC-SHA256 signing key (`>= 32` chars). |
+| `NODE_ENV` | **Configuration** | **Yes** | `production` | Enables fail-closed secret & DB checks, static asset serving, `trust proxy`, and HSTS. |
+| `PORT` | **Configuration** | **Yes** | `3000` | TCP listening port injected by the hosting platform. |
+| `HOST` | **Configuration** | Optional | `0.0.0.0` | Network interface bind address for container ingress. |
+| `TRUST_PROXY` | **Configuration** | Optional | `1` (in prod) | Enables Express `trust proxy` (`1` hop) behind Cloud Run / Nginx TLS proxies. |
+| `CORS_ALLOWED_ORIGINS` | **Configuration** | Optional | `""` (Deny cross-origin) | Comma-separated explicit origin allowlist. Never allows wildcard `*`. |
+| `ENABLE_HSTS` | **Configuration** | Optional | `true` (in prod) | Emits `Strict-Transport-Security: max-age=31536000; includeSubDomains`. |
+| `JWT_EXPIRES_IN` | **Optional Config** | Optional | `86400` | JWT token lifetime in seconds (24 hours). |
+| `AUTH_RATE_LIMIT_WINDOW_MS` | **Optional Config** | Optional | `60000` | Rate-limit window (ms) for `/api/v1/auth/login` and `/register`. |
+| `AUTH_RATE_LIMIT_MAX` | **Optional Config** | Optional | `30` | Max authentication requests per window per client IP. |
+| `API_RATE_LIMIT_WINDOW_MS` | **Optional Config** | Optional | `60000` | Rate-limit window (ms) for general `/api/v1/*` routes. |
+| `API_RATE_LIMIT_MAX` | **Optional Config** | Optional | `300` | Max general API requests per window per client IP. |
+
+### 4. Production Release, Migration & Rollback Runbook
+
+```bash
+# 1. Execute pre-flight secret & DB isolation checks, build artifacts, and apply pending SQL migrations
+npm run deploy:release
+
+# 2. Start compiled production server (or deploy container revision to Cloud Run)
+npm run start:prod
+
+# 3. Verify live health endpoint
+curl -i https://<service-url>/api/v1/health
+
+# 4. Rollback to prior known-good revision if post-deploy verification fails
+gcloud run services update-traffic billing-system-api \
+  --region=europe-west2 \
+  --to-revisions=<PREVIOUS_REVISION>=100
+```
+
+
 
 
 

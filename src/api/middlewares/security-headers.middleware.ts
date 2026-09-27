@@ -40,7 +40,13 @@ export function createSecurityHeadersMiddleware(options: SecurityHeadersOptions 
     }
 
     // Only emit Strict-Transport-Security when HTTPS production assumptions hold
-    if (enableHsts) {
+    const forwardedProto = req.headers['x-forwarded-proto'];
+    const isHttpsForwarded =
+      req.secure ||
+      (typeof forwardedProto === 'string' &&
+        forwardedProto.split(',')[0].trim().toLowerCase() === 'https');
+
+    if (enableHsts || (options.enableHsts === undefined && isHttpsForwarded)) {
       res.setHeader('Strict-Transport-Security', `max-age=${hstsMaxAge}; includeSubDomains`);
     }
 

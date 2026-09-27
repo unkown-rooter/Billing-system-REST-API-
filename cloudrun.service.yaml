@@ -1,0 +1,110 @@
+# ============================================================================
+# Billing System REST API — Phase 11 Google Cloud Run Service Specification
+# ============================================================================
+# Declarative Knative / Google Cloud Run production service configuration.
+# Deploys the Phase 10 multi-stage production container image (`runtime` stage)
+# with managed HTTPS/TLS termination, Secret Manager runtime secret injection,
+# non-root execution (`USER node`, UID 1000), read-only root filesystem, and
+# truthful HTTP + PostgreSQL startup/liveness probes on `GET /api/v1/health`.
+#
+# Rollback Command (zero-downtime traffic shift to prior immutable revision):
+#   gcloud run services update-traffic billing-system-api \
+#     --region=europe-west2 \
+#     --to-revisions=<PREVIOUS_KNOWN_GOOD_REVISION>=100
+# ============================================================================
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: billing-system-api
+  labels:
+    cloud.googleapis.com/location: europe-west2
+    app.kubernetes.io/name: billing-system-api
+    app.kubernetes.io/phase: phase-11-production
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/description: "Billing System REST API (Phase 11 Production Deployment)"
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "4"
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/startup-cpu-boost: "true"
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 60
+      containers:
+        - name: billing-api-runtime
+          # Built from the Phase 10 multi-stage Dockerfile (`runtime` target stage)
+          image: europe-west2-docker.pkg.dev/billing-system-prod/containers/billing-system-api:phase11
+          command: ["node"]
+          args: ["dist-server/server.js"]
+          ports:
+            - name: http1
+              containerPort: 3000
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: true
+          env:
+            # Core Production Runtime Configuration
+            - name: NODE_ENV
+              value: "production"
+            - name: HOST
+              value: "0.0.0.0"
+            - name: TRUST_PROXY
+              value: "1"
+            - name: ENABLE_HSTS
+              value: "true"
+            - name: JWT_EXPIRES_IN
+              value: "86400"
+            # Restrictive CORS Policy (server-to-server / same-origin posture; no wildcard '*')
+            - name: CORS_ALLOWED_ORIGINS
+              value: ""
+            # Rate Limiting Configuration
+            - name: AUTH_RATE_LIMIT_WINDOW_MS
+              value: "60000"
+            - name: AUTH_RATE_LIMIT_MAX
+              value: "30"
+            - name: API_RATE_LIMIT_WINDOW_MS
+              value: "60000"
+            - name: API_RATE_LIMIT_MAX
+              value: "300"
+            # Required Production Secrets (injected at runtime from Secret Manager; never hardcoded)
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: billing-prod-database-url
+                  key: latest
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: billing-prod-jwt-secret
+                  key: latest
+          resources:
+            limits:
+              cpu: "1000m"
+              memory: 512Mi
+          # Truthful Startup Probe -> Express -> PostgreSQL `SELECT 1`
+          startupProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 3000
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 4
+            failureThreshold: 6
+          # Truthful Periodic Liveness Probe -> Express -> PostgreSQL `SELECT 1`
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+  traffic:
+    - percent: 100
+      latestRevision: true

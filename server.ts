@@ -1,17 +1,18 @@
+import 'dotenv/config';
 import path from 'node:path';
 import fs from 'node:fs';
 import express from 'express';
 import { createApp } from './src/api/app.js';
 import { closePool } from './src/api/db/pool.js';
-import { createServer as createViteServer } from 'vite';
 
 async function startServer(): Promise<void> {
   const app = createApp();
   const PORT = Number(process.env.PORT) || 3000;
-  const HOST = '0.0.0.0';
+  const HOST = process.env.HOST || '0.0.0.0';
 
-  // Mount Vite dev middleware in development; serve static dist files in production
+  // Mount Vite dev middleware only in non-production; serve static dist files in production
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -26,8 +27,8 @@ async function startServer(): Promise<void> {
 
   const server = app.listen(PORT, HOST, () => {
     console.log(`===============================================`);
-    console.log(` Billing System REST API running in Phase 9`);
-    console.log(` Domain: Relational Billing + Security Hardening`);
+    console.log(` Billing System REST API running in Phase 11`);
+    console.log(` Domain: Production Deployment & Cloud Hosting`);
     console.log(` Security: JWT + RBAC/IDOR + Rate-Limit + Headers`);
     console.log(` Server listening at http://${HOST}:${PORT}`);
     console.log(` Health check: http://${HOST}:${PORT}/api/v1/health`);
@@ -53,7 +54,10 @@ async function startServer(): Promise<void> {
     }, 5000);
     timeoutHandle.unref();
 
-    // 1. Stop accepting new HTTP connections
+    // 1. Stop accepting new HTTP connections and close idle keep-alive sockets
+    if (typeof server.closeIdleConnections === 'function') {
+      server.closeIdleConnections();
+    }
     server.close(async (err) => {
       if (err) {
         console.error('[PROCESS] Error closing HTTP server:', err);

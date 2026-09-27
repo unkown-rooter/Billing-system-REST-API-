@@ -547,11 +547,11 @@ export default function App() {
                   Billing System REST API
                 </span>
                 <span className="px-2 py-0.5 rounded text-[11px] font-semibold uppercase tracking-wider bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-                  Phase 6: Relational Modeling
+                  Phase 11: Production Deployment & Hosting
                 </span>
               </div>
               <p className="text-xs text-slate-400">
-                Relational Domain Modeling (Customer → Invoice → InvoiceItem), Foreign Keys & Atomic Transactions
+                Relational Ledger (Customer → Invoice → InvoiceItem), RBAC/IDOR, Pagination, Security Hardening, Docker & Cloud Run Production Hosting
               </p>
             </div>
           </div>
@@ -941,16 +941,16 @@ export default function App() {
                   <span>GET /auth/me</span>
                 </button>
                 <button
-                  onClick={() => setExplorerPreset('GET', '/api/v1/customers', undefined, true)}
+                  onClick={() => setExplorerPreset('GET', '/api/v1/customers?page=1&limit=10&sort=createdAt&order=desc', undefined, true)}
                   className="px-2.5 py-1 text-xs rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono transition"
                 >
-                  GET /customers
+                  GET /customers?page=1&limit=10
                 </button>
                 <button
-                  onClick={() => setExplorerPreset('GET', '/api/v1/invoices', undefined, true)}
+                  onClick={() => setExplorerPreset('GET', '/api/v1/invoices?page=1&limit=10&sort=total&order=desc', undefined, true)}
                   className="px-2.5 py-1 text-xs rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono transition"
                 >
-                  GET /invoices
+                  GET /invoices?page=1&sort=total
                 </button>
                 <button
                   onClick={() =>
@@ -1162,14 +1162,14 @@ export default function App() {
                 <div>
                   <h2 className="text-base font-semibold text-white flex items-center gap-2">
                     <ShieldCheck className="w-5 h-5 text-indigo-400" />
-                    <span>Schema Validation & Authentication Security Lab</span>
+                    <span>Schema Validation, Security Hardening & Container Runtime Lab</span>
                   </h2>
                   <p className="text-xs text-slate-400 mt-1">
-                    Directly test authentication contracts, token verification boundaries, timing attack mitigations, and structured error responses.
+                    Directly test authentication contracts, RBAC/IDOR boundaries, pagination & filter guards, HTTP security headers, and structured error responses across Phases 1–11.
                   </p>
                 </div>
                 <span className="px-2.5 py-1 rounded bg-indigo-500/10 text-indigo-300 text-xs font-mono border border-indigo-500/20">
-                  105 Automated Tests Passing
+                  212 Automated Tests Passing (13 Suites)
                 </span>
               </div>
             </div>
@@ -1367,7 +1367,7 @@ export default function App() {
 
             {/* Error Architecture Reference Table */}
             <div className="bg-slate-900/60 p-5 rounded-xl border border-slate-800">
-              <h3 className="text-sm font-semibold text-white mb-3">Unified Error Vocabulary (Phase 3 + Phase 4)</h3>
+              <h3 className="text-sm font-semibold text-white mb-3">Unified Error Vocabulary (Phases 1–11)</h3>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs text-left text-slate-300">
                   <thead className="bg-slate-950 border-b border-slate-800 font-semibold text-slate-400 uppercase tracking-wider">
@@ -1395,7 +1395,7 @@ export default function App() {
                       <td className="py-2.5 px-3 text-rose-400">INVALID_TOKEN</td>
                       <td className="py-2.5 px-3">401 Unauthorized</td>
                       <td className="py-2.5 px-3 font-sans text-slate-400">Token Verification</td>
-                      <td className="py-2.5 px-3 font-sans text-slate-400">Rejects malformed tokens or signature mismatches</td>
+                      <td className="py-2.5 px-3 font-sans text-slate-400">Rejects malformed tokens, alg:none, or signature mismatches</td>
                     </tr>
                     <tr>
                       <td className="py-2.5 px-3 text-rose-400">TOKEN_EXPIRED</td>
@@ -1413,7 +1413,13 @@ export default function App() {
                       <td className="py-2.5 px-3 text-amber-400">VALIDATION_ERROR</td>
                       <td className="py-2.5 px-3">400 Bad Request</td>
                       <td className="py-2.5 px-3 font-sans text-slate-400">Validation Schema</td>
-                      <td className="py-2.5 px-3 font-sans text-slate-400">Returns granular <code>fields[]</code> diagnostics</td>
+                      <td className="py-2.5 px-3 font-sans text-slate-400">Returns granular <code>fields[]</code> diagnostics & blocks prototype/null-byte injection</td>
+                    </tr>
+                    <tr>
+                      <td className="py-2.5 px-3 text-amber-400">METHOD_NOT_ALLOWED</td>
+                      <td className="py-2.5 px-3">405 Method Not Allowed</td>
+                      <td className="py-2.5 px-3 font-sans text-slate-400">Route Method Guard</td>
+                      <td className="py-2.5 px-3 font-sans text-slate-400">Rejects unsupported HTTP verbs with explicit RFC 9110 <code>Allow</code> header</td>
                     </tr>
                     <tr>
                       <td className="py-2.5 px-3 text-rose-400">DUPLICATE_RESOURCE</td>
@@ -1426,6 +1432,12 @@ export default function App() {
                       <td className="py-2.5 px-3">409 Conflict</td>
                       <td className="py-2.5 px-3 font-sans text-slate-400">Relational / State Guard</td>
                       <td className="py-2.5 px-3 font-sans text-slate-400">ON DELETE RESTRICT customer with invoices or paid invoice mutation</td>
+                    </tr>
+                    <tr>
+                      <td className="py-2.5 px-3 text-rose-400">RATE_LIMIT_EXCEEDED</td>
+                      <td className="py-2.5 px-3">429 Too Many Requests</td>
+                      <td className="py-2.5 px-3 font-sans text-slate-400">Auth / API Rate Limiter</td>
+                      <td className="py-2.5 px-3 font-sans text-slate-400">Throttles brute-force & high-rate floods with <code>Retry-After</code> header</td>
                     </tr>
                   </tbody>
                 </table>
@@ -1480,33 +1492,36 @@ export default function App() {
             <div className="bg-slate-900/60 p-6 rounded-xl border border-slate-800 space-y-4">
               <h2 className="text-base font-semibold text-white flex items-center gap-2">
                 <Layers className="w-5 h-5 text-indigo-400" />
-                <span>Request & Authentication Lifecycle</span>
+                <span>Phases 1–11 Cloud Run HTTPS Ingress, Security & Container Runtime Lifecycle</span>
               </h2>
 
               <div className="p-4 bg-slate-950 rounded-lg border border-slate-800/80 font-mono text-xs text-slate-300 overflow-x-auto">
-                <pre>{`HTTP Request
+                <pre>{`HTTPS Client Request (TLS Termination at Cloud Run Edge → X-Forwarded-Proto: https)
      ↓
-Express Middleware
+Container Port 3000 (Non-Root USER node UID 1000, Read-Only Rootfs, TRUST_PROXY=1)
+     ↓
+Security & Transport Hardening (Phases 9–11)
      ├── Disable 'X-Powered-By'
+     ├── SecurityHeaders (nosniff, DENY, CSP, no-store, HSTS max-age=31536000)
+     ├── Restrictive CORS Policy (CORS_ALLOWED_ORIGINS whitelist)
      ├── express.json({ limit: '100kb', strict: false })
-     └── requestLogger (Method, Path, Status, Latency)
+     └── Redacted Request Logger (CRLF & secret redaction)
      ↓
-Express Router (/api/v1)
-     ├── /health           → HealthController (Public)
-     ├── /auth/register    → validateRegisterBody → AuthController.register (Public)
-     ├── /auth/login       → validateLoginBody    → AuthController.login (Public)
-     ├── /auth/me          → authenticate         → AuthController.getMe (PROTECTED)
-     └── /customers        → CustomerController
-              ├── POST   → validateCreateCustomer → CustomerController.create
-              ├── GET    → CustomerController.getAll / getById
-              ├── PATCH  → validateUpdateCustomer → CustomerController.update
-              └── DELETE → authenticate           → CustomerController.delete (PROTECTED)
+Express Router (/api/v1 + General API Rate Limiter)
+     ├── /health              → HealthController (GET 200/503, 405 on other verbs)
+     ├── /auth/register       → authRateLimiter → validateRegisterBody → AuthController.register
+     ├── /auth/login          → authRateLimiter → validateLoginBody    → AuthController.login
+     ├── /auth/me             → authenticate    → AuthController.getMe
+     ├── /customers           → authenticate    → Pagination/Filter/Sort + Ownership/RBAC
+     ├── /customers/:id/invoices → authenticate → Scoped Customer Invoice Ledger
+     ├── /invoices            → authenticate    → Atomic Transaction (Invoice + Items)
+     └── /invoices/:id/items  → authenticate    → Line Item Addition & Calculation
      ↓
-Authentication Middleware (createAuthMiddleware)
-     ├── Extracts Authorization: Bearer <token>
-     ├── Verifies HMAC-SHA256 signature using constant-time timingSafeEqual
-     ├── Verifies expiration window (exp > now)
-     └── Attaches AuthenticatedUser { id, email } to req.user`}</pre>
+PostgreSQL 15 Production Pool (pg.Pool → billing_system_prod)
+     ├── Strict DB Isolation: billing_system (Dev) ≠ billing_system_test (Test) ≠ billing_system_prod (Prod)
+     ├── Parameterized SQL ($1, $2, ...) + Whitelisted ORDER BY columns
+     ├── Integer-cents financial arithmetic (subtotal + tax - discount = total)
+     └── Clean SIGTERM graceful HTTP + Pool drain in Docker container`}</pre>
               </div>
             </div>
 
@@ -1514,35 +1529,41 @@ Authentication Middleware (createAuthMiddleware)
             <div className="bg-slate-900/60 p-6 rounded-xl border border-slate-800 space-y-4">
               <h2 className="text-base font-semibold text-white flex items-center gap-2">
                 <Database className="w-5 h-5 text-indigo-400" />
-                <span>PostgreSQL Versioned Schema Migrations</span>
+                <span>PostgreSQL Versioned Schema Migrations (001–005)</span>
               </h2>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 font-mono text-xs">
-                  <div className="text-slate-400 font-bold mb-2">001_create_customers_table.sql</div>
-                  <pre className="text-emerald-300 text-[11px] overflow-x-auto">{`CREATE TABLE customers (
-    id TEXT PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    email VARCHAR(254) NOT NULL,
-    currency CHAR(3) NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL
+                  <div className="text-slate-400 font-bold mb-2">001 & 002: Customers & Accounts</div>
+                  <pre className="text-emerald-300 text-[11px] overflow-x-auto">{`-- 001_create_customers_table.sql
+CREATE TABLE customers (
+  id TEXT PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  email VARCHAR(254) NOT NULL,
+  currency CHAR(3) NOT NULL
 );
-CREATE UNIQUE INDEX idx_customers_email_lower 
-ON customers (LOWER(email));`}</pre>
+-- 002_create_accounts_table.sql
+CREATE TABLE accounts (
+  id TEXT PRIMARY KEY,
+  email VARCHAR(254) NOT NULL,
+  password_hash TEXT NOT NULL
+);`}</pre>
                 </div>
 
                 <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 font-mono text-xs">
-                  <div className="text-slate-400 font-bold mb-2">002_create_accounts_table.sql</div>
-                  <pre className="text-indigo-300 text-[11px] overflow-x-auto">{`CREATE TABLE accounts (
-    id TEXT PRIMARY KEY,
-    email VARCHAR(254) NOT NULL,
-    password_hash TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL
+                  <div className="text-slate-400 font-bold mb-2">003, 004 & 005: RBAC, Invoices & Indexes</div>
+                  <pre className="text-indigo-300 text-[11px] overflow-x-auto">{`-- 003: accounts.role ('user'|'admin') & customers.account_id
+-- 004: invoices (ON DELETE RESTRICT) & invoice_items (CASCADE)
+CREATE TABLE invoices (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES accounts(id),
+  customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
+  invoice_number VARCHAR(64) NOT NULL,
+  status VARCHAR(20) NOT NULL,
+  subtotal NUMERIC(12,2) NOT NULL,
+  total NUMERIC(12,2) NOT NULL
 );
-CREATE UNIQUE INDEX idx_accounts_email_lower 
-ON accounts (LOWER(email));`}</pre>
+-- 005: B-Tree indexes on currency, status, issue_date, due_date, created_at`}</pre>
                 </div>
               </div>
             </div>

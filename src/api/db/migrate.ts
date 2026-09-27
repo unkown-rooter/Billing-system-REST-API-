@@ -99,8 +99,11 @@ export async function runMigrations(customConnectionString?: string): Promise<Mi
   }
 }
 
-// Allow direct execution from command line via tsx/node
-if (process.argv[1] && process.argv[1].endsWith('migrate.ts')) {
+// Allow direct execution from command line via node (compiled migrate.js) or tsx (migrate.ts)
+if (
+  process.argv[1] &&
+  (process.argv[1].endsWith('migrate.ts') || process.argv[1].endsWith('migrate.js'))
+) {
   runMigrations()
     .then(() => {
       console.log('[MIGRATE] Migration process exited cleanly.');

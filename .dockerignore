@@ -1,0 +1,46 @@
+# ============================================================================
+# Billing System REST API - Phase 10 Docker Build Context Exclusions
+# ============================================================================
+# Prevents secrets, local credentials, development caches, test suites,
+# and Git metadata from entering the Docker build context or image layers.
+
+# Dependencies & Build Outputs (generated cleanly inside builder stage)
+node_modules
+dist
+dist-server
+build
+coverage
+
+# Version Control & Editor Metadata
+.git
+.gitignore
+.DS_Store
+.vscode
+.idea
+
+# Secrets & Environment Configuration (NEVER copy real .env files into images)
+.env
+.env.*
+!.env.example
+
+# Logs, Temporary Files & Local Database Data
+logs
+*.log
+npm-debug.log*
+tmp
+temp
+pgdata
+*.deb
+
+# Automated Test Suites (not required in production runtime image)
+src/test
+
+# Container Definitions & Deployment Manifests
+Dockerfile
+Dockerfile.*
+docker-compose.yml
+docker-compose.*.yml
+compose.yaml
+cloudrun.service.yaml
+scripts
+
