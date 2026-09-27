@@ -1,464 +1,483 @@
+<div align="center">
+
 # Billing System REST API
 
-A production-grade, API-first, backend-first REST API built with **Node.js**, **Express.js**, **TypeScript**, and **PostgreSQL**.
+**A production-grade, multi-tenant financial ledger and invoicing REST API built with Node.js, Express, TypeScript, and PostgreSQL.**
 
-This service serves as the core billing and accounting ledger for external client applications (web frontends, mobile applications, CLI tools, and background services).
+[![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?style=for-the-badge&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-Strict-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Express.js](https://img.shields.io/badge/Express.js-4.21-000000?style=for-the-badge&logo=express&logoColor=white)](https://expressjs.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15%2B-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Docker](https://img.shields.io/badge/Docker-Multi--Stage-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
+[![Tests](https://img.shields.io/badge/Tests-212%20Passing-10B981?style=for-the-badge&logo=checkmarx&logoColor=white)](#verification--testing)
+[![License](https://img.shields.io/badge/License-MIT-F59E0B?style=for-the-badge)](#license)
 
----
+[Overview](#project-description) •
+[Core Features](#core-api-features) •
+[Architecture](#architecture-diagram) •
+[API Reference](#api-endpoints-documentation) •
+[Request & Response Examples](#example-api-request--response) •
+[Tech Stack](#tech-stack) •
+[Getting Started](#getting-started) •
+[Project Status](#project-status) •
+[Roadmap](#roadmap) •
+[License](#license)
 
-## 1. What the Billing System API Is
-
-The Billing System REST API provides a centralized, structured interface for managing the financial relationship between a business and its customers. It tracks customer identities, products/services, invoices, line items, taxes, discounts, payments, and balances.
-
----
-
-## 2. Phase 2 Architecture: PostgreSQL Persistence
-
-> **PERSISTENCE STATUS:**
-> - **Phase 1** used ephemeral in-memory storage (`Map<string, Customer>`).
-> - **Phase 2** replaces in-memory storage with durable, database-backed **PostgreSQL persistence**.
-> 
-> **PostgreSQL is now the single production source of truth for customer records.** Records survive application restarts, connection pool drains, and container reboots.
-
-### Architectural Inversion of Control
-The application adheres strictly to layered separation:
-
-```
-HTTP Request
-     ↓
-Express Middleware
-     ├── Disable 'X-Powered-By'
-     ├── express.json({ limit: '100kb', strict: true })
-     └── requestLogger (Method, Path, Status, Latency)
-     ↓
-Express Router (/api/v1)
-     ├── /health    → HealthController
-     └── /customers → CustomerController
-     ↓
-CustomerController
-     ├── Handles HTTP params, query DTOs, and status codes (200, 201, 204, 400, 404, 409)
-     ├── Sets Location header on creation
-     └── Does NOT know PostgreSQL exists
-     ↓
-CustomerService
-     ├── Enforces business rules (string lengths, RFC formats, currency ISO 4217)
-     ├── Generates domain identifiers (`cus_<uuidv4>`)
-     ├── Protects immutable attributes (id, createdAt)
-     └── Does NOT contain any SQL
-     ↓
-ICustomerRepository (Contract Interface)
-     ↓
-PostgresCustomerRepository
-     ├── Owns all SQL and parameterized queries ($1, $2, ...)
-     ├── Maps DB columns (created_at, updated_at) to Domain model (createdAt, updatedAt)
-     └── Translates DB constraint violations (Postgres 23505) into domain errors (DuplicateResourceError)
-     ↓
-PostgreSQL Connection Pool (pg.Pool)
-     ├── Managed lifecycle via DATABASE_URL
-     ├── Reuses connections, avoids per-query overhead
-     └── Cleanly drained on SIGTERM / SIGINT graceful shutdown
-     ↓
-PostgreSQL Database
-```
+</div>
 
 ---
 
-## 3. Database Schema & Integrity Constraints
+## Project Description
 
-The `customers` table is provisioned via the versioned migration runner (`migrations/001_create_customers_table.sql`):
+The **Billing System REST API** is a backend-first financial service designed to manage the end-to-end billing lifecycle between businesses and their customers. It provides a strictly typed, transactional interface for operator authentication, customer ledger management, multi-item invoice issuance, deterministic financial calculation, and role-scoped reporting.
 
-```sql
-CREATE TABLE IF NOT EXISTS customers (
-    id TEXT PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    email VARCHAR(254) NOT NULL,
-    currency CHAR(3) NOT NULL DEFAULT 'USD',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT chk_customers_currency CHECK (currency ~ '^[A-Z]{3}$')
-);
+The system enforces a strict separation between **Identity (`Account`)** and **Billing Domain (`Customer`, `Invoice`, `InvoiceItem`)**:
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_email_lower 
-ON customers (LOWER(email));
-```
-
-### Constraint Rationale
-1. **Primary Key on `id`:** Retains the public API `cus_<uuidv4>` identifier directly in the database without artificial translation.
-2. **Case-Insensitive Email Uniqueness:** `CREATE UNIQUE INDEX ... ON customers (LOWER(email))` prevents race conditions at the database engine level. `finance@wayne.com` and `FINANCE@WAYNE.COM` are guaranteed unique.
-3. **Currency Invariant:** `CHECK (currency ~ '^[A-Z]{3}$')` enforces exact 3-letter uppercase ISO 4217 currency representations.
-4. **Non-Null Invariants:** Mandatory fields cannot be set to `NULL`.
-5. **UTC Timestamps:** `TIMESTAMPTZ` stores exact microsecond-precision UTC timestamps.
+- **Accounts (`acc_<uuid>`)** represent authenticated API operators or service principals that sign in and receive stateless Bearer tokens.
+- **Customers (`cus_<uuid>`)** represent billed legal entities or individuals owned by an Account (`accountId`) with a designated ISO 4217 ledger currency (`USD`, `EUR`, `KES`, etc.).
+- **Invoices (`inv_<uuid>`)** and **Invoice Line Items (`item_<uuid>`)** represent immutable-by-default financial obligations persisted atomically inside PostgreSQL transactions (`BEGIN ... COMMIT / ROLLBACK`) with server-side integer-cents arithmetic.
 
 ---
 
-## 4. Migration System
+## Core API Features
 
-Migrations are tracked in the database inside the `schema_migrations` table:
-
-```sql
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(255) NOT NULL UNIQUE,
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-```
-
-### Migration Idempotency
-- Each migration file in `/migrations` is executed inside an atomic database transaction (`BEGIN ... COMMIT`).
-- Successfully applied files are recorded in `schema_migrations`.
-- Running `npm run migrate` repeatedly safely recognizes that existing migrations are already applied and skips them without errors.
-
----
-
-## 5. Technology Stack
-
-- **Runtime:** Node.js (v22+)
-- **Framework:** Express.js (v4.21+)
-- **Language:** TypeScript (v7+, strict mode enabled, `noImplicitAny: true`)
-- **Database Driver:** `pg` (v8.13+, native node-postgres)
-- **Database:** PostgreSQL (v15+)
-- **Database Management:** Direct SQL with parameterized queries; zero ORM abstraction overhead
-- **Testing:** Node.js native `node:test` and `node:assert/strict`
-- **Execution:** `tsx` for high-performance TypeScript execution
+- **Stateless JWT Authentication & Memory-Hard Cryptography**
+  - RFC 7519 `HS256` JSON Web Tokens verified via constant-time HMAC comparison (`crypto.timingSafeEqual`).
+  - Password hashing powered by Node.js native memory-hard `crypto.scrypt` with unique 16-byte cryptographic salts per account.
+  - Anti-enumeration login flow executing timing-safe dummy derivations when an account email is not found.
+- **Role-Based Access Control (RBAC) & Zero-Trust Ownership (IDOR Prevention)**
+  - Least-privilege default role (`user`) enforced at registration and database schema levels; administrative privileges (`admin`) are restricted to out-of-band provisioning.
+  - Transitive ownership enforcement across `Account → Customer → Invoice → InvoiceItem`. Standard users can only access or mutate resources bound to their own `accountId`; cross-account access attempts return `403 FORBIDDEN` with zero data leakage.
+- **Transactional Relational Ledger & Integer-Cents Financial Engine**
+  - Invoices and line items are created and updated atomically inside explicit PostgreSQL transactions.
+  - All financial totals (`lineTotal`, `subtotal`, `tax`, `discount`, `total`) are computed exclusively server-side in integer cents (`Math.round(amount * 100)`) to eliminate IEEE-754 floating-point drift.
+  - Referential integrity enforced at the database engine level (`ON DELETE RESTRICT` protecting customers with historical invoices; `ON DELETE CASCADE` cleaning up child line items when an invoice is deleted).
+  - Finalized state locks prevent financial mutation once an invoice reaches `paid` or `cancelled` status (`409 CONFLICT`).
+- **Bounded Pagination, Domain Filtering & Whitelisted Sorting**
+  - Collection endpoints support 1-indexed `page` and `limit` (`1..100`) pagination with deterministic `pagination` metadata (`total`, `totalPages`, `hasNextPage`, `hasPreviousPage`).
+  - Parameterized filtering by currency, status, customer, email, name/description substring (`ILIKE`), and ISO 8601 date ranges (`issueDateFrom`/`To`, `dueDateFrom`/`To`).
+  - Compile-time column whitelisting and primary-key tie-breaking (`ORDER BY <col> <dir>, id <dir>`) prevent SQL identifier injection and guarantee stable page ordering.
+- **Defense-in-Depth Security Hardening**
+  - Strict schema validation rejecting unknown fields, mass-assignment attempts (`id`, `accountId`, `role`, `subtotal`, `total`, `invoiceNumber`), prototype pollution keys (`__proto__`, `constructor`, `prototype`), and UTF-8 null bytes (`\u0000`).
+  - Dedicated brute-force rate limiter on authentication routes and general flood rate limiter across `/api/v1/*` emitting `X-RateLimit-*` and `Retry-After` headers (`429 RATE_LIMIT_EXCEEDED`).
+  - Hardened HTTP response headers (`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Permissions-Policy`, strict API `Content-Security-Policy`, `Cache-Control: no-store`, and `Strict-Transport-Security` over HTTPS).
+  - Automatic log redaction stripping CRLF injection sequences and masking credentials, tokens, and connection strings.
+- **Multi-Stage Docker Runtime & Production Readiness**
+  - Two-stage `Dockerfile` (`node:22-bookworm-slim`) compiling TypeScript to native ES2022 JavaScript (`dist-server/`) and running as non-root `USER node` (`UID 1000`) on a read-only root filesystem.
+  - Fail-closed startup validation in `NODE_ENV=production` when `DATABASE_URL` or a strong `JWT_SECRET` (`>= 32` characters) is missing.
+  - Truthful `/api/v1/health` probe verifying live PostgreSQL connectivity (`SELECT 1`) and graceful `SIGTERM`/`SIGINT` connection draining.
 
 ---
 
-## 6. Installation & Configuration
+## Architecture Diagram
 
-### Prerequisites
-- Node.js (v22 or higher)
-- PostgreSQL (v15 or higher) running locally or remotely
+### 1. Request, Security & Persistence Lifecycle
 
-### 1. Environment Configuration
-Copy the example environment file:
-```bash
-cp .env.example .env
-```
-Configure `DATABASE_URL` in `.env`:
-```env
-DATABASE_URL="postgresql://username:password@localhost:5432/billing_system"
-```
-
-> **SECURITY:** `.env` is ignored by Git. Real database credentials must never be committed.
-
-### 2. Install Dependencies
-```bash
-npm install
-```
-
-### 3. Run Database Migrations
-Create the database tables and constraints:
-```bash
-npm run migrate
-```
-
----
-
-## 7. Running the Application
-
-### Development Server
-Starts the Express + Vite server in development mode:
-```bash
-npm run dev
-```
-
-### Production Build & Execution (Compiled JavaScript)
-Compiles the frontend assets (`dist/`) and backend server (`dist-server/`), applies database migrations, and starts the production Node.js server:
-```bash
-npm run build
-npm run migrate:prod
-npm run start:prod
+```text
+HTTPS Client Request
+     │
+     ▼
+Reverse Proxy / TLS Termination (X-Forwarded-Proto: https, X-Forwarded-For)
+     │
+     ▼
+Express Application Boundary (Port 3000, Non-Root UID 1000, Read-Only Rootfs)
+     ├── SecurityHeadersMiddleware (nosniff, DENY, CSP, no-store, HSTS)
+     ├── CorsMiddleware (Explicit CORS_ALLOWED_ORIGINS allowlist; no wildcard '*')
+     ├── express.json({ limit: '100kb', strict: false }) → 400 MALFORMED_JSON / 413 PAYLOAD_TOO_LARGE
+     └── RequestLoggerMiddleware (CRLF sanitization & credential redaction)
+     │
+     ▼
+Versioned API Router (/api/v1 + General API Rate Limiter)
+     ├── MethodNotAllowedGuard               → 405 METHOD_NOT_ALLOWED (with RFC 9110 Allow header)
+     ├── AuthRateLimiter (/auth/*)           → 429 RATE_LIMIT_EXCEEDED (with Retry-After header)
+     ├── AuthenticationMiddleware (JWT HS256) → 401 AUTHENTICATION_REQUIRED | INVALID_TOKEN | TOKEN_EXPIRED
+     ├── AuthorizationMiddleware (RBAC)      → 403 FORBIDDEN
+     └── SchemaValidationMiddleware          → 400 VALIDATION_ERROR (with granular fields[])
+     │
+     ▼
+Domain Controllers (HealthController, AuthController, CustomerController, InvoiceController)
+     │  Extracts validated DTOs & authenticated principal; sets HTTP status codes & Location headers
+     ▼
+Domain Services (AuthService, PasswordService, TokenService, CustomerService, InvoiceService)
+     │  Enforces ownership (IDOR checks), integer-cents invoice math, state locks & domain invariants
+     ▼
+Repository Layer (IAccountRepository, ICustomerRepository, IInvoiceRepository)
+     │  Executes 100% parameterized SQL ($1, $2, ...), atomic transactions (BEGIN/COMMIT/ROLLBACK),
+     │  batched item hydration (ANY($1::text[])), and maps SQLSTATE codes (23505, 23503, 23514)
+     ▼
+PostgreSQL Connection Pool (pg.Pool) ──► PostgreSQL 15+ Database
 ```
 
-### Docker & Docker Compose (Phase 10 Container Runtime)
-Build and run the multi-stage production container image with an external PostgreSQL 15 container:
-```bash
-# Start PostgreSQL 15 + API container stack via Docker Compose
-docker compose up --build -d
+### 2. Relational Domain & Database Schema Model
 
-# Apply migrations inside the running API container
-docker compose exec api node dist-server/src/api/db/migrate.js
-
-# Check container health
-curl -i http://localhost:3000/api/v1/health
+```text
++-----------------------------------------------------------------------------------+
+| accounts                                                                          |
+|-----------------------------------------------------------------------------------|
+| PK  id             TEXT          ('acc_<uuidv4>')                                 |
+| UQ  email          VARCHAR(254)  (Unique index on LOWER(email))                   |
+|     password_hash  TEXT          (scrypt derived key)                             |
+|     role           VARCHAR(32)   (CHECK role IN ('user', 'admin') DEFAULT 'user') |
+|     created_at     TIMESTAMPTZ                                                    |
+|     updated_at     TIMESTAMPTZ                                                    |
++-----------------------------------------------------------------------------------+
+                                         │ 1
+                                         │ ON DELETE RESTRICT
+                                         ▼ 0..N
++-----------------------------------------------------------------------------------+
+| customers                                                                         |
+|-----------------------------------------------------------------------------------|
+| PK  id             TEXT          ('cus_<uuidv4>')                                 |
+| FK  account_id     TEXT          (REFERENCES accounts(id) ON DELETE RESTRICT)     |
+|     name           VARCHAR(255)                                                   |
+| UQ  email          VARCHAR(254)  (Unique index on LOWER(email))                   |
+|     currency       CHAR(3)       (CHECK currency ~ '^[A-Z]{3}$')                  |
+|     created_at     TIMESTAMPTZ                                                    |
+|     updated_at     TIMESTAMPTZ                                                    |
++-----------------------------------------------------------------------------------+
+                                         │ 1
+                                         │ ON DELETE RESTRICT
+                                         ▼ 0..N
++-----------------------------------------------------------------------------------+
+| invoices                                                                          |
+|-----------------------------------------------------------------------------------|
+| PK  id             TEXT          ('inv_<uuidv4>')                                 |
+| FK  customer_id    TEXT          (REFERENCES customers(id) ON DELETE RESTRICT)    |
+| UQ  invoice_number VARCHAR(64)   ('INV-YYYY-XXXX-XXXX')                           |
+|     status         VARCHAR(32)   ('draft'|'issued'|'paid'|'overdue'|'cancelled')  |
+|     currency       CHAR(3)       (Matches parent customer ISO 4217 currency)      |
+|     subtotal       NUMERIC(12,2) (Server-computed sum of line items)              |
+|     tax            NUMERIC(12,2) (CHECK tax >= 0)                                 |
+|     discount       NUMERIC(12,2) (CHECK discount >= 0 AND discount <= sub + tax)  |
+|     total          NUMERIC(12,2) (CHECK total = subtotal + tax - discount)        |
+|     issue_date     TIMESTAMPTZ                                                    |
+|     due_date       TIMESTAMPTZ   (CHECK due_date >= issue_date)                   |
+|     notes          VARCHAR(1000)                                                  |
+|     created_at     TIMESTAMPTZ                                                    |
+|     updated_at     TIMESTAMPTZ                                                    |
++-----------------------------------------------------------------------------------+
+                                         │ 1
+                                         │ ON DELETE CASCADE
+                                         ▼ 1..N
++-----------------------------------------------------------------------------------+
+| invoice_items                                                                     |
+|-----------------------------------------------------------------------------------|
+| PK  id             TEXT          ('item_<uuidv4>')                                |
+| FK  invoice_id     TEXT          (REFERENCES invoices(id) ON DELETE CASCADE)      |
+|     description    VARCHAR(500)                                                   |
+|     quantity       INTEGER       (CHECK quantity > 0)                             |
+|     unit_price     NUMERIC(12,2) (CHECK unit_price >= 0)                          |
+|     line_total     NUMERIC(12,2) (CHECK line_total = quantity * unit_price)       |
+|     created_at     TIMESTAMPTZ                                                    |
+|     updated_at     TIMESTAMPTZ                                                    |
++-----------------------------------------------------------------------------------+
 ```
 
 ---
 
-## 8. Verification & Testing
+## API Endpoints Documentation
 
-### 1. TypeScript Verification (Client & Server)
-```bash
-npm run lint
-```
+**Base Path:** `/api/v1`
 
-### 2. Fast Layered Test Pyramid (Phases 1–9 Unit, Service-Repo & HTTP Suites)
-Runs isolated unit tests, service-repository transaction tests, HTTP contract & security header tests, validation, authentication, authorization, relationships, pagination, and security hardening suites:
-```bash
-npm test
-```
+### 1. Endpoint Overview & Authorization Matrix
 
-### 3. Live PostgreSQL Integration Tests
-Verifies real PostgreSQL 15 database connectivity, schema migrations (`001`–`005`), constraints, unique indexes, process restart durability, and test DB isolation (`billing_system_test` ≠ `billing_system`):
-```bash
-npm run test:integration
-```
+| Method | Endpoint | Auth Required | `user` Role Policy | `admin` Role Policy | Success Status |
+|---|---|---|---|---|---|
+| `GET` | `/api/v1/health` | No | Public health & DB probe | Public health & DB probe | `200 OK` / `503` |
+| `POST` | `/api/v1/auth/register` | No | Registers account (`role: 'user'`) | N/A | `201 Created` |
+| `POST` | `/api/v1/auth/login` | No | Issues signed `HS256` Bearer token | Issues signed `HS256` Bearer token | `200 OK` |
+| `GET` | `/api/v1/auth/me` | Bearer Token | Returns own account profile | Returns own account profile | `200 OK` |
+| `POST` | `/api/v1/customers` | Bearer Token | Creates customer bound to own `accountId` | Creates customer bound to own `accountId` | `201 Created` |
+| `GET` | `/api/v1/customers` | Bearer Token | Lists own customers (paginated) | Lists all customers (paginated) | `200 OK` |
+| `GET` | `/api/v1/customers/:id` | Bearer Token | Reads own customer (`403` on others) | Reads any customer | `200 OK` |
+| `PATCH` | `/api/v1/customers/:id` | Bearer Token | Updates own customer (`403` on others) | Updates any customer (preserves owner) | `200 OK` |
+| `DELETE` | `/api/v1/customers/:id` | Bearer Token | `403 FORBIDDEN` | Deletes customer (`409` if invoices exist) | `204 No Content` |
+| `POST` | `/api/v1/customers/:id/invoices` | Bearer Token | Creates invoice for own customer (`403` on others) | Creates invoice for any customer | `201 Created` |
+| `GET` | `/api/v1/customers/:id/invoices` | Bearer Token | Lists invoices for own customer (`403` on others) | Lists invoices for any customer | `200 OK` |
+| `POST` | `/api/v1/invoices` | Bearer Token | Creates invoice for own customer (`403` on others) | Creates invoice for any customer | `201 Created` |
+| `GET` | `/api/v1/invoices` | Bearer Token | Lists own customers' invoices (paginated) | Lists all invoices (paginated) | `200 OK` |
+| `GET` | `/api/v1/invoices/:id` | Bearer Token | Reads own customer's invoice (`403` on others) | Reads any invoice | `200 OK` |
+| `PATCH` | `/api/v1/invoices/:id` | Bearer Token | Updates own customer's invoice (`403` on others) | Updates any invoice | `200 OK` |
+| `DELETE` | `/api/v1/invoices/:id` | Bearer Token | `403 FORBIDDEN` | Deletes invoice & cascades line items | `204 No Content` |
+| `GET` | `/api/v1/invoices/:id/items` | Bearer Token | Lists items for own invoice (`403` on others) | Lists items for any invoice | `200 OK` |
 
-### 4. Phase 10 Container Runtime & Production Artifact Tests
-Verifies the multi-stage `Dockerfile`, `.dockerignore`, compiled `dist-server/server.js` execution as non-root `node` user on a read-only root filesystem, PostgreSQL persistence across container replacement, `SIGTERM` graceful shutdown, and fail-closed production secret checks:
-```bash
-npm run test:docker
-```
-
-### 5. Phase 11 Production Deployment & Live Hosting Verification Tests
-Verifies the Google Cloud Run declarative service manifest (`cloudrun.service.yaml`), release script (`scripts/deploy-release.sh`), strict three-way PostgreSQL database separation (`billing_system` ≠ `billing_system_test` ≠ `billing_system_prod`), production migration idempotency, fail-closed `DATABASE_URL` and `JWT_SECRET` startup enforcement, HTTPS/TLS termination (`Strict-Transport-Security`), live API workflows, and persistence across container restart:
-```bash
-npm run test:deploy
-```
-
-### 6. Full Test Pyramid (Phases 1–11: 212 Tests Across 13 Suites)
-```bash
-npm run test:all
-```
+> **HTTP Method Enforcement:** Sending an unsupported HTTP verb (such as `PUT` on `/api/v1/customers` or `DELETE` on `/api/v1/health`) returns `405 Method Not Allowed` with an RFC 9110 `Allow` header listing the permitted methods for that resource.
 
 ---
 
-## 9. API Specification & Endpoints
+### 2. Query Parameters: Pagination, Filtering & Sorting
 
-**Base URL:** `http://localhost:3000/api/v1`
+All collection endpoints (`GET /api/v1/customers`, `GET /api/v1/invoices`, `GET /api/v1/customers/:id/invoices`, and `GET /api/v1/invoices/:id/items`) support standardized pagination and sorting parameters:
 
-### Standard Response Envelopes
+| Parameter | Type | Default | Constraints & Behavior |
+|---|---|---|---|
+| `page` | Integer | `1` | `1`-indexed page number (`1..1,000,000`). Calculates `OFFSET = (page - 1) * limit`. |
+| `limit` | Integer | `20` | Page size (`1..100`). Values `< 1` or `> 100` return `400 VALIDATION_ERROR`. |
+| `sort` | String | `createdAt` | Whitelisted field name per resource (see below). |
+| `order` | String | `asc` | Sort direction: `asc` or `desc`. Deterministic tie-breaking on `id` is always applied. |
 
-#### Success Envelope
-```json
-{
-  "status": "success",
-  "data": { ... }
-}
-```
+#### Resource-Specific Filter & Sort Parameters
 
-#### Error Envelope
-```json
-{
-  "status": "error",
-  "error": {
-    "code": "ERROR_CODE",
-    "message": "Human readable description of the error"
-  }
-}
-```
-
-Standard error codes across Phases 1–10:
-- `VALIDATION_ERROR` (HTTP 400)
-- `MALFORMED_JSON` (HTTP 400)
-- `AUTHENTICATION_REQUIRED` (HTTP 401)
-- `INVALID_CREDENTIALS` (HTTP 401)
-- `INVALID_TOKEN` (HTTP 401)
-- `TOKEN_EXPIRED` (HTTP 401)
-- `FORBIDDEN` (HTTP 403)
-- `RESOURCE_NOT_FOUND` (HTTP 404)
-- `ROUTE_NOT_FOUND` (HTTP 404)
-- `METHOD_NOT_ALLOWED` (HTTP 405)
-- `DUPLICATE_RESOURCE` (HTTP 409)
-- `CONFLICT` (HTTP 409)
-- `PAYLOAD_TOO_LARGE` (HTTP 413)
-- `RATE_LIMIT_EXCEEDED` (HTTP 429)
-- `INTERNAL_SERVER_ERROR` (HTTP 500)
+| Collection Endpoint | Supported Filter Query Parameters | Whitelisted `sort` Fields |
+|---|---|---|
+| `GET /api/v1/customers` | `currency` (exact 3-letter ISO code)<br>`email` (case-insensitive exact match)<br>`name` (case-insensitive substring match) | `createdAt`, `updatedAt`, `name`, `email` |
+| `GET /api/v1/invoices`<br>`GET /api/v1/customers/:id/invoices` | `status` (`draft`, `issued`, `paid`, `overdue`, `cancelled`)<br>`customerId` (`cus_<uuid>`, on `/api/v1/invoices`)<br>`currency` (exact 3-letter ISO code)<br>`issueDate`, `issueDateFrom`, `issueDateTo` (ISO 8601 / `YYYY-MM-DD`)<br>`dueDate`, `dueDateFrom`, `dueDateTo` (ISO 8601 / `YYYY-MM-DD`) | `createdAt`, `updatedAt`, `issueDate`, `dueDate`, `total`, `subtotal`, `invoiceNumber`, `status` |
+| `GET /api/v1/invoices/:id/items` | `description` (case-insensitive substring match) | `createdAt`, `quantity`, `unitPrice`, `lineTotal`, `description` |
 
 ---
 
-### Endpoints
+### 3. Standardized Error Vocabulary
 
-#### 1. Truthful Health Check
-Tests application uptime and executes `SELECT 1` on PostgreSQL.
+All error responses return a uniform JSON envelope and never expose stack traces, SQL queries, or internal file paths:
 
-- **URL:** `GET /api/v1/health`
-- **Response (Database Connected - 200 OK):**
+| Error Code | HTTP Status | Trigger Condition |
+|---|---|---|
+| `VALIDATION_ERROR` | `400 Bad Request` | Invalid field types/constraints, unknown properties, mass-assignment fields, or invalid query parameters (includes `fields[]` array). |
+| `MALFORMED_JSON` | `400 Bad Request` | Syntactically invalid JSON payload in request body. |
+| `AUTHENTICATION_REQUIRED` | `401 Unauthorized` | Missing `Authorization: Bearer <token>` header on a protected endpoint. |
+| `INVALID_CREDENTIALS` | `401 Unauthorized` | Unknown email or incorrect password during `POST /api/v1/auth/login`. |
+| `INVALID_TOKEN` | `401 Unauthorized` | Malformed JWT, tampered HMAC signature, disallowed algorithm (`alg: "none"`), or invalid claims. |
+| `TOKEN_EXPIRED` | `401 Unauthorized` | JWT `exp` timestamp has passed. |
+| `FORBIDDEN` | `403 Forbidden` | Authenticated principal lacks required role (`admin`) or attempts cross-account resource access (IDOR). |
+| `RESOURCE_NOT_FOUND` | `404 Not Found` | Structurally valid resource ID (`cus_*`, `inv_*`, `acc_*`) does not exist. |
+| `ROUTE_NOT_FOUND` | `404 Not Found` | Request path does not match any registered `/api/v1/*` route. |
+| `METHOD_NOT_ALLOWED` | `405 Method Not Allowed` | HTTP verb is not supported on a known route (includes `Allow` response header). |
+| `DUPLICATE_RESOURCE` | `409 Conflict` | Case-insensitive email uniqueness violation or duplicate invoice number. |
+| `CONFLICT` | `409 Conflict` | Deleting a customer with existing invoices (`ON DELETE RESTRICT`) or mutating a `paid`/`cancelled` invoice. |
+| `PAYLOAD_TOO_LARGE` | `413 Payload Too Large` | Request body exceeds the `100kb` JSON limit. |
+| `RATE_LIMIT_EXCEEDED` | `429 Too Many Requests` | Client exceeded authentication or API rate limit window (includes `Retry-After` header). |
+| `DATABASE_ERROR` | `500 Internal Server Error` | Operational database failure (details logged server-side with redaction; sanitized message returned). |
+| `INTERNAL_SERVER_ERROR` | `500 Internal Server Error` | Unexpected runtime error (sanitized message returned). |
+
+---
+
+## Example API Request & Response
+
+### 1. Health & Database Connectivity Check (`GET /api/v1/health`)
+
+**Request:**
+```bash
+curl -i -X GET "http://localhost:3000/api/v1/health"
+```
+
+**Response (`200 OK`):**
 ```json
 {
   "status": "success",
   "data": {
     "status": "healthy",
-    "timestamp": "2026-09-24T13:42:27.549Z",
-    "uptime": 1.898774134,
+    "timestamp": "2026-09-27T06:36:12.826Z",
+    "uptime": 45.024261335,
     "database": {
       "status": "healthy"
     }
   }
 }
 ```
-- **Response (Database Degraded - 503 Service Unavailable):**
+
+---
+
+### 2. Register & Authenticate an Operator Account
+
+**Register Request (`POST /api/v1/auth/register`):**
+```bash
+curl -i -X POST "http://localhost:3000/api/v1/auth/register" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "billing.ops@acme-corp.example.com",
+    "password": "<STRONG_PASSWORD_MIN_8_CHARS>"
+  }'
+```
+
+**Register Response (`201 Created`):**
 ```json
 {
-  "status": "error",
+  "status": "success",
   "data": {
-    "status": "degraded",
-    "timestamp": "2026-09-24T13:43:22.673Z",
-    "uptime": 2.1245,
-    "database": {
-      "status": "unhealthy"
+    "id": "acc_cb5d153e-a061-45ac-b338-acaa916bd5e5",
+    "email": "billing.ops@acme-corp.example.com",
+    "role": "user",
+    "createdAt": "2026-09-27T06:36:14.102Z",
+    "updatedAt": "2026-09-27T06:36:14.102Z"
+  }
+}
+```
+
+**Login Request (`POST /api/v1/auth/login`):**
+```bash
+curl -i -X POST "http://localhost:3000/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "billing.ops@acme-corp.example.com",
+    "password": "<STRONG_PASSWORD_MIN_8_CHARS>"
+  }'
+```
+
+**Login Response (`200 OK`):**
+```json
+{
+  "status": "success",
+  "data": {
+    "token": "<SIGNED_HS256_JWT_BEARER_TOKEN>",
+    "tokenType": "Bearer",
+    "expiresIn": 86400,
+    "account": {
+      "id": "acc_cb5d153e-a061-45ac-b338-acaa916bd5e5",
+      "email": "billing.ops@acme-corp.example.com",
+      "role": "user",
+      "createdAt": "2026-09-27T06:36:14.102Z",
+      "updatedAt": "2026-09-27T06:36:14.102Z"
     }
   }
 }
 ```
 
-#### 2. List Customers
-Returns all customers from PostgreSQL. Starts completely empty (`[]`).
+---
 
-- **URL:** `GET /api/v1/customers`
-- **Response:** `200 OK`
-```json
-{
-  "status": "success",
-  "data": []
-}
-```
+### 3. Create & Query Customers
 
-#### 3. Create Customer
-Persists a customer to PostgreSQL. Server generates `id`, `createdAt`, and `updatedAt`.
-
-- **URL:** `POST /api/v1/customers`
-- **Headers:** `Content-Type: application/json`
-- **Body:**
-```json
-{
-  "name": "Wayne Enterprises",
-  "email": "finance@wayne.com",
-  "currency": "USD"
-}
-```
-- **Response:** `201 Created`
-- **Headers:** `Location: /api/v1/customers/cus_4a41c717-3143-4c12-9bf3-de0f4642d7c3`
-```json
-{
-  "status": "success",
-  "data": {
-    "id": "cus_4a41c717-3143-4c12-9bf3-de0f4642d7c3",
+**Create Customer Request (`POST /api/v1/customers`):**
+```bash
+curl -i -X POST "http://localhost:3000/api/v1/customers" \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
     "name": "Wayne Enterprises",
-    "email": "finance@wayne.com",
-    "currency": "USD",
-    "createdAt": "2026-09-24T13:42:32.165Z",
-    "updatedAt": "2026-09-24T13:42:32.165Z"
-  }
-}
+    "email": "ap@wayne-enterprises.example.com",
+    "currency": "USD"
+  }'
 ```
 
-#### 4. Get Customer by ID
-- **URL:** `GET /api/v1/customers/:id`
-- **Response (200 OK):**
+**Create Customer Response (`201 Created`):**
 ```json
 {
   "status": "success",
   "data": {
     "id": "cus_4a41c717-3143-4c12-9bf3-de0f4642d7c3",
+    "accountId": "acc_cb5d153e-a061-45ac-b338-acaa916bd5e5",
     "name": "Wayne Enterprises",
-    "email": "finance@wayne.com",
+    "email": "ap@wayne-enterprises.example.com",
     "currency": "USD",
-    "createdAt": "2026-09-24T13:42:32.165Z",
-    "updatedAt": "2026-09-24T13:42:32.165Z"
+    "createdAt": "2026-09-27T06:36:15.410Z",
+    "updatedAt": "2026-09-27T06:36:15.410Z"
   }
 }
 ```
 
-#### 5. Update Customer (PATCH)
-- **URL:** `PATCH /api/v1/customers/:id`
-- **Body:**
+**Paginated & Filtered Customer Query (`GET /api/v1/customers`):**
+```bash
+curl -i -X GET "http://localhost:3000/api/v1/customers?page=1&limit=10&currency=USD&sort=createdAt&order=desc" \
+  -H "Authorization: Bearer <ACCESS_TOKEN>"
+```
+
+**Paginated Customer Response (`200 OK`):**
 ```json
 {
-  "name": "Wayne Enterprises Holdings",
-  "currency": "EUR"
+  "status": "success",
+  "data": [
+    {
+      "id": "cus_4a41c717-3143-4c12-9bf3-de0f4642d7c3",
+      "accountId": "acc_cb5d153e-a061-45ac-b338-acaa916bd5e5",
+      "name": "Wayne Enterprises",
+      "email": "ap@wayne-enterprises.example.com",
+      "currency": "USD",
+      "createdAt": "2026-09-27T06:36:15.410Z",
+      "updatedAt": "2026-09-27T06:36:15.410Z"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "limit": 10,
+    "total": 1,
+    "totalPages": 1,
+    "hasNextPage": false,
+    "hasPreviousPage": false
+  }
 }
 ```
-- **Response (200 OK):**
+
+---
+
+### 4. Issue a Multi-Item Invoice (`POST /api/v1/invoices`)
+
+**Request:**
+```bash
+curl -i -X POST "http://localhost:3000/api/v1/invoices" \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customerId": "cus_4a41c717-3143-4c12-9bf3-de0f4642d7c3",
+    "status": "issued",
+    "tax": 25.00,
+    "discount": 10.00,
+    "issueDate": "2026-09-27T00:00:00.000Z",
+    "dueDate": "2026-10-27T00:00:00.000Z",
+    "notes": "Q4 Dedicated Infrastructure Commitment",
+    "items": [
+      {
+        "description": "Dedicated Compute Cluster (Monthly)",
+        "quantity": 2,
+        "unitPrice": 150.00
+      },
+      {
+        "description": "Managed PostgreSQL High-Availability Add-on",
+        "quantity": 1,
+        "unitPrice": 85.00
+      }
+    ]
+  }'
+```
+
+**Response (`201 Created`):**
 ```json
 {
   "status": "success",
   "data": {
-    "id": "cus_4a41c717-3143-4c12-9bf3-de0f4642d7c3",
-    "name": "Wayne Enterprises Holdings",
-    "email": "finance@wayne.com",
-    "currency": "EUR",
-    "createdAt": "2026-09-24T13:42:32.165Z",
-    "updatedAt": "2026-09-24T13:42:38.516Z"
+    "id": "inv_9f82b310-7c12-49a1-8b20-61f3d9a8c112",
+    "customerId": "cus_4a41c717-3143-4c12-9bf3-de0f4642d7c3",
+    "invoiceNumber": "INV-2026-4821-9F82",
+    "status": "issued",
+    "currency": "USD",
+    "subtotal": 385.00,
+    "tax": 25.00,
+    "discount": 10.00,
+    "total": 400.00,
+    "issueDate": "2026-09-27T00:00:00.000Z",
+    "dueDate": "2026-10-27T00:00:00.000Z",
+    "notes": "Q4 Dedicated Infrastructure Commitment",
+    "items": [
+      {
+        "id": "item_3d19a400-1b2c-4d5e-9f00-112233445566",
+        "invoiceId": "inv_9f82b310-7c12-49a1-8b20-61f3d9a8c112",
+        "description": "Dedicated Compute Cluster (Monthly)",
+        "quantity": 2,
+        "unitPrice": 150.00,
+        "lineTotal": 300.00,
+        "createdAt": "2026-09-27T06:36:18.904Z",
+        "updatedAt": "2026-09-27T06:36:18.904Z"
+      },
+      {
+        "id": "item_7a88e911-4c5d-4e6f-8a11-77889900aabb",
+        "invoiceId": "inv_9f82b310-7c12-49a1-8b20-61f3d9a8c112",
+        "description": "Managed PostgreSQL High-Availability Add-on",
+        "quantity": 1,
+        "unitPrice": 85.00,
+        "lineTotal": 85.00,
+        "createdAt": "2026-09-27T06:36:18.904Z",
+        "updatedAt": "2026-09-27T06:36:18.904Z"
+      }
+    ],
+    "createdAt": "2026-09-27T06:36:18.904Z",
+    "updatedAt": "2026-09-27T06:36:18.904Z"
   }
 }
 ```
 
-#### 6. Delete Customer
-- **URL:** `DELETE /api/v1/customers/:id`
-- **Response:** `204 No Content` (Strictly empty body)
-
 ---
 
-## 10. Security & Data Protection in Phase 2
+### 5. Standardized Error Response Examples
 
-1. **Strictly Parameterized SQL:** 100% of queries executed against PostgreSQL use positional parameters (`$1, $2, ...`). Zero string concatenation is permitted.
-2. **Credential Sanitization:** Database credentials reside exclusively in environment variables. Database errors are caught and sanitized to generic `500 INTERNAL_SERVER_ERROR` without leaking hostnames, usernames, passwords, or schema table names.
-3. **Graceful Pool Draining:** `SIGTERM` and `SIGINT` signals first stop HTTP reception, then drain all PostgreSQL client connections before exiting.
-4. **No Fallback Ambiguity:** When PostgreSQL is unavailable, the application does **not** fall back to in-memory maps. It fails truthfully, preserving data integrity.
-
----
-
-## 11. Known Limitations (Phase 2)
-
-- **Single Table:** Only the `customers` resource is persisted. Products, invoices, and payments are scheduled for subsequent phases.
-- **No Query Pagination:** `GET /api/v1/customers` returns all customers without cursor or limit/offset pagination.
-- **No Multi-Row Transactions:** CRUD operations modify single rows. Multi-table transaction orchestration belongs to the invoicing phase.
-- **Authentication:** The API does not yet require API keys or bearer tokens.
-
----
-
-## 12. Phase 3 Architecture: Schema Validation & Standardized Error Handling
-
-Phase 3 introduces an explicit, declarative validation layer and a unified, standardized error architecture across the entire request-response lifecycle.
-
-### Request Lifecycle
-```
-HTTP Request
-    ↓
-HTTP / JSON Parsing (express.json limit: 100kb, strict: false)
-    ↓ [catches SyntaxError → 400 MALFORMED_JSON]
-Request Validation Middleware
-    ├── validateCreateCustomer / validateUpdateCustomer
-    └── validateCustomerId (:id format: cus_<string>)
-    ↓ [catches invalid shape / constraints → 400 VALIDATION_ERROR with fields[]]
-Route (/api/v1/customers)
-    ↓
-Controller (CustomerController)
-    ├── Extracts typed, pre-sanitized DTOs
-    └── Invokes domain service
-    ↓
-Service (CustomerService)
-    ├── Orchestrates domain business rules & email uniqueness
-    └── Protects entity invariants
-    ↓
-Repository (PostgresCustomerRepository)
-    ├── Executes parameterized SQL queries ($1, $2, ...)
-    └── Maps PostgreSQL error codes (e.g. 23505 → DuplicateResourceError)
-    ↓
-Centralized Error Handler (errorHandler)
-    ├── Maps domain/application errors to standard HTTP status codes
-    ├── Formats uniform JSON envelopes
-    └── Sanitizes unexpected failures (never leaks stack traces, paths, or SQL)
-    ↓
-Standardized HTTP Response
-```
-
-### Standardized Error Envelopes
-
-Every error response adheres strictly to the top-level envelope:
-```json
-{
-  "status": "error",
-  "error": {
-    "code": "ERROR_CODE",
-    "message": "Human-readable diagnostic summary"
-  }
-}
-```
-
-#### Field-Level Validation Details
-When validation fails for one or more fields, the error envelope includes a structured `fields` array providing granular diagnostics:
+**Field Validation Failure (`400 Bad Request`):**
 ```json
 {
   "status": "error",
@@ -471,10 +490,6 @@ When validation fails for one or more fields, the error envelope includes a stru
         "message": "Field 'name' is required"
       },
       {
-        "field": "email",
-        "message": "Field 'email' must be a valid email address"
-      },
-      {
         "field": "currency",
         "message": "Field 'currency' must be a valid 3-letter uppercase ISO code (e.g. USD, EUR, KES)"
       }
@@ -483,767 +498,202 @@ When validation fails for one or more fields, the error envelope includes a stru
 }
 ```
 
-### Application Error Vocabulary
-
-| Error Code | HTTP Status | Description | Sanitization Guarantee |
-|---|---|---|---|
-| `VALIDATION_ERROR` | `400 Bad Request` | Missing/invalid fields, wrong types, unknown fields, immutable field modifications, or malformed customer IDs | Includes `fields[]` diagnostic array |
-| `MALFORMED_JSON` | `400 Bad Request` | Unparseable JSON syntax received in HTTP request body | Sanitized message; no parser stack trace |
-| `RESOURCE_NOT_FOUND` | `404 Not Found` | Target customer ID is structurally valid but does not exist in the database | Predictable message with ID |
-| `ROUTE_NOT_FOUND` | `404 Not Found` | Requested HTTP path or method is not registered | Lists method and attempted route |
-| `DUPLICATE_RESOURCE` | `409 Conflict` | Unique constraint conflict (e.g. case-insensitive email already in use) | Domain message; no raw SQL code 23505 |
-| `PAYLOAD_TOO_LARGE` | `413 Payload Too Large` | Request body exceeds the 100kb limit | Rejects oversized payload safely |
-| `DATABASE_ERROR` | `500 Internal Server Error` | Database connection or query operation failed | Operational query error logged server-side; response sanitized |
-| `INTERNAL_SERVER_ERROR` | `500 Internal Server Error` | Unhandled runtime exception or infrastructure crash | Full stack trace logged to server stderr; response contains zero internal details |
-
-### Request Contracts & Validation Invariants
-
-#### 1. Create Customer (`POST /api/v1/customers`)
-- **Body Shape:** Must be a valid JSON object (rejects `null`, arrays `[]`, strings `"..."`, numbers `123`).
-- **Required Fields:** `name`, `email`, `currency`.
-- **Field Constraints:**
-  - `name`: String, 1–255 characters, trimmed, cannot be empty whitespace.
-  - `email`: String, 1–254 characters, RFC-compliant format, trimmed & lowercased.
-  - `currency`: String, exactly 3 uppercase alphabetic characters (`^[A-Z]{3}$`).
-- **Unknown Fields:** Strict rejection. Supplying extra properties (e.g. `isAdmin`, `balance`) returns `400 VALIDATION_ERROR`.
-
-#### 2. Update Customer (`PATCH /api/v1/customers/:id`)
-- **Body Shape:** Must be a non-empty JSON object.
-- **Allowed Mutable Fields:** `name`, `email`, `currency` (at least one must be provided).
-- **Immutable Fields:** Modification of `id` or `createdAt` is explicitly rejected with `400 VALIDATION_ERROR`.
-- **Unknown Fields:** Any field other than `name`, `email`, `currency` is rejected with `400 VALIDATION_ERROR`.
-
-#### 3. Path Parameters (`:id`)
-- **Format:** Must match `^cus_[a-zA-Z0-9_-]+$`.
-- **Malformed ID (`12345`, `invalid!id`):** Returns `400 Bad Request` with `VALIDATION_ERROR`.
-- **Valid Format but Nonexistent:** Returns `404 Not Found` with `RESOURCE_NOT_FOUND`.
-
----
-
-## 13. Testing & Verification
-
-The suite includes comprehensive automated tests across all locked phases:
-1. **Unit, Validation, Authentication & Authorization Contract Tests (`npm test`):**
-   - 18 Phase 1 functional tests verifying routing, CRUD, and isolated in-memory persistence.
-   - 23 Phase 3 schema validation tests verifying shape validation, constraint enforcement, field details, immutable field protection, path parameter formats, malformed JSON handling, and failure injection sanitization.
-   - 22 Phase 4 authentication tests verifying registration, scrypt password hashing, case-insensitive email uniqueness, login credential verification, timing-attack neutral dummy checks, Bearer token lifecycle, expiration verification, and protected endpoint access (`GET /auth/me` and `DELETE /customers/:id`).
-   - 24 Phase 5 authorization tests verifying least-privilege role defaults (`user`), role validation, strict `401` vs `403 FORBIDDEN` separation, resource ownership binding (`accountId`), cross-account IDOR protection (`Account A` vs `Account B`), admin global access & deletion, and privilege escalation prevention.
-   - Total: **87 passing unit & contract tests**.
-2. **PostgreSQL Integration Tests (`npm run test:integration`):**
-   - 19 PostgreSQL integration tests verifying migrations (`001_create_customers_table.sql`, `002_create_accounts_table.sql`, and `003_add_authorization_role_and_ownership.sql`), SQL-level constraints (PK, case-insensitive UNIQUE index, currency CHECK, role CHECK, foreign key `account_id`), durable restart survival, truthful degraded state reporting, and PostgreSQL-backed IDOR & RBAC enforcement.
-
-To run tests:
-```bash
-npm test                  # Run all 87 unit, validation, authentication & authorization tests
-npm run test:auth         # Run Phase 4 authentication test suite specifically
-npm run test:authz        # Run Phase 5 authorization & IDOR test suite specifically
-npm run test:integration  # Run Phase 2 & Phase 5 PostgreSQL integration test suite
-```
-
----
-
-## 14. Phase 4 Architecture: Authentication & Identity Management
-
-Phase 4 establishes a cryptographically secure identity layer answering: **«Who is making this request?»**
-
-### 1. Domain Separation: Accounts vs. Customers
-
-An intentional boundary separates the accounting ledger from API authentication:
-
-- **Customer (`customers` table):** A billing entity (individual or legal entity) that receives invoices, line items, and maintains a balance in a default ledger currency (`USD`, `EUR`, etc.).
-- **Account (`accounts` table):** An authenticated identity (API user / operator / system client) holding login credentials (`email` + `passwordHash`) authorized to interact with the API.
-
-An account signs in with credentials to issue Bearer tokens; customers do not have passwords.
-
-### 2. Authentication Strategy: Stateless JWT Bearer Tokens
-
-- **Protocol:** RFC 6750 Bearer Tokens via standard `Authorization: Bearer <token>` header.
-- **Signing Algorithm:** HMAC with SHA-256 (`HS256`).
-- **Signature Verification:** Constant-time verification (`crypto.timingSafeEqual`) prevents byte-by-byte timing leaks.
-- **Key Derivation & Secret:** Configured via `JWT_SECRET` environment variable (minimum 32 characters).
-- **Token Claims:** Minimal payload containing only identity and role claims:
-  ```json
-  {
-    "sub": "acc_cb5d153e-a061-45ac-b338-acaa916bd5e5",
-    "email": "operator@billing.com",
-    "role": "user",
-    "iat": 1727280000,
-    "exp": 1727366400
-  }
-  ```
-- **Security Guarantees:**
-  - Passwords and password hashes are **never** placed into JWT claims.
-  - No personal or sensitive billing data is stored in the token.
-  - Explicit expiration window: default 24 hours (`86400` seconds), configurable via `JWT_EXPIRES_IN`.
-  - Expired tokens are rejected immediately with `401 TOKEN_EXPIRED`.
-  - Tampered or malformed tokens (including unrecognized `role` claims) are rejected with `401 INVALID_TOKEN`.
-
-### 3. Password Security: Memory-Hard `scrypt`
-
-- **Algorithm:** Node.js native `crypto.scrypt` (OWASP recommended memory-hard password derivation function).
-- **Work Factor:** `N = 16384` (CPU/memory cost), `r = 8` (block size), `p = 1` (parallel threads), derived key length = 64 bytes.
-- **Salt:** 16 cryptographically secure random bytes generated per password (`crypto.randomBytes(16)`), defeating rainbow tables.
-- **Storage Format:** Positional crypt string: `scrypt$N=16384,r=8,p=1$<saltHex>$<derivedKeyHex>`.
-- **Policy Invariants:**
-  - Minimum 8 characters, maximum 128 characters.
-  - Rejection of whitespace-only strings.
-  - Passwords are **never** logged to disk or console.
-  - Passwords and hashes are **never** returned in HTTP responses.
-
-### 4. Anti-Enumeration & Timing Attack Defense
-
-To eliminate user enumeration vulnerabilities during login:
-1. **Unified Error Contract:** Attempting to log in with an unknown email or with an incorrect password returns the exact same response:
-   ```json
-   {
-     "status": "error",
-     "error": {
-       "code": "INVALID_CREDENTIALS",
-       "message": "Invalid email or password"
-     }
-   }
-   ```
-2. **Constant-Time Execution via Dummy Hash:** When an email is not found in the database, `AuthService` executes a real `scrypt` derivation against an internal pre-computed dummy hash. As a result, the server response latency for nonexistent accounts is virtually identical to existing accounts with incorrect passwords.
-
-### 5. Authentication Endpoints
-
-#### Register Account
-- **URL:** `POST /api/v1/auth/register`
-- **Request Body:**
-  ```json
-  {
-    "email": "operator@billing.com",
-    "password": "SuperSecurePassword123!"
-  }
-  ```
-- **Response (201 Created):**
-  - **Header:** `Location: /api/v1/auth/me`
-  ```json
-  {
-    "status": "success",
-    "data": {
-      "id": "acc_cb5d153e-a061-45ac-b338-acaa916bd5e5",
-      "email": "operator@billing.com",
-      "role": "user",
-      "createdAt": "2026-09-25T17:22:04.717Z",
-      "updatedAt": "2026-09-25T17:22:04.717Z"
-    }
-  }
-  ```
-
-#### Login & Issue Token
-- **URL:** `POST /api/v1/auth/login`
-- **Request Body:**
-  ```json
-  {
-    "email": "operator@billing.com",
-    "password": "SuperSecurePassword123!"
-  }
-  ```
-- **Response (200 OK):**
-  ```json
-  {
-    "status": "success",
-    "data": {
-      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-      "tokenType": "Bearer",
-      "expiresIn": 86400,
-      "account": {
-        "id": "acc_cb5d153e-a061-45ac-b338-acaa916bd5e5",
-        "email": "operator@billing.com",
-        "role": "user",
-        "createdAt": "2026-09-25T17:22:04.717Z",
-        "updatedAt": "2026-09-25T17:22:04.717Z"
-      }
-    }
-  }
-  ```
-
-#### Current Authenticated Identity (Protected)
-- **URL:** `GET /api/v1/auth/me`
-- **Header:** `Authorization: Bearer <token>`
-- **Response (200 OK):**
-  ```json
-  {
-    "status": "success",
-    "data": {
-      "id": "acc_cb5d153e-a061-45ac-b338-acaa916bd5e5",
-      "email": "operator@billing.com",
-      "role": "user",
-      "createdAt": "2026-09-25T17:22:04.717Z",
-      "updatedAt": "2026-09-25T17:22:04.717Z"
-    }
-  }
-  ```
-
----
-
-## 15. Phase 5 Architecture: Authorization & Access Control
-
-Phase 5 establishes a deterministic authorization layer answering: **«What is this authenticated identity allowed to do?»**
-
-### 1. Authentication vs. Authorization Pipeline
-
-Authentication and authorization are strictly separated across the request lifecycle:
-
-```
-HTTP Request
-     ↓
-Authentication Middleware (authenticate)
-     ├── Validates Bearer token signature & expiration
-     ├── Establishes req.user = { id, email, role }
-     └── Fails with 401 Unauthorized (AUTHENTICATION_REQUIRED | INVALID_TOKEN | TOKEN_EXPIRED)
-     ↓
-Route Authorization Middleware (authorize(...allowedRoles))
-     ├── Evaluates req.user.role against route role policy ('user' | 'admin')
-     ├── Contains zero business logic and zero SQL queries
-     └── Fails with 403 Forbidden (FORBIDDEN)
-     ↓
-Validation Middleware (validate*)
-     ├── Validates path parameters and JSON request body
-     └── Rejects client-supplied role/ownership fields with 400 VALIDATION_ERROR
-     ↓
-CustomerController
-     ├── Extracts req.user and validated DTO
-     └── Delegates to CustomerService
-     ↓
-CustomerService (Resource Ownership Policy)
-     ├── Binds customer.accountId = req.user.id on creation
-     ├── Enforces ownership (customer.accountId === req.user.id || req.user.role === 'admin')
-     ├── Protects against Insecure Direct Object Reference (IDOR) with 403 FORBIDDEN
-     └── Restricts destructive DELETE strictly to 'admin' role
-     ↓
-Repository (PostgresCustomerRepository / InMemoryCustomerRepository)
-     └── Executes parameterized persistence queries
-```
-
-### 2. Domain Relationship: `Account` (1) → `Customer` (0..N)
-
-Preserving Phase 4's separation between **Account** (authenticated identity) and **Customer** (billing ledger record), Phase 5 establishes an explicit ownership relationship:
-- Each `Customer` record belongs to an owning `Account` via `accountId` (`customers.account_id` foreign key referencing `accounts(id)`).
-- Ownership is assigned exclusively server-side from the authenticated `req.user.id` when `POST /api/v1/customers` is executed.
-- Clients can **never** supply or modify `accountId`, `userId`, or `ownerId` in request bodies.
-
-### 3. Role Model & Least-Privilege Default
-
-The authorization model defines a minimal, non-speculative two-role set justified directly by API operations:
-
-| Role | Assignment Mechanism | Capabilities |
-|---|---|---|
-| `user` | **Default least-privileged role** assigned server-side (`AuthService.register`) and enforced by database default (`DEFAULT 'user'`). | Create customers (bound to own `accountId`), list own customers, inspect own customer (`GET /:id`), and update own customer (`PATCH /:id`). Cannot access other accounts' customers or delete ledger records. |
-| `admin` | **Out-of-band provisioned** (never via public registration). | Full ledger visibility (`GET /customers`, `GET /customers/:id`), cross-account customer updates (`PATCH /customers/:id` while preserving original `accountId`), and destructive customer deletion (`DELETE /customers/:id`). |
-
-### 4. Administrator Provisioning Strategy
-
-To prevent privilege escalation:
-- Public registration (`POST /api/v1/auth/register`) strictly rejects any `role` attribute in the request body (`400 VALIDATION_ERROR`) and hard-assigns `role: 'user'` in `AuthService.register`.
-- No hard-coded administrator credentials or fake admin accounts are seeded in application runtime code.
-- In production environments, `admin` privileges are granted out-of-band by an authorized database administrator or internal ops migration against the `accounts` table:
-  ```sql
-  UPDATE accounts SET role = 'admin', updated_at = NOW() WHERE email = 'ops-admin@company.com';
-  ```
-
-### 5. Customer Endpoint Authorization Policy Matrix
-
-| Endpoint | Unauthenticated | Authenticated `user` (Owner) | Authenticated `user` (Non-Owner / IDOR) | Authenticated `admin` |
-|---|---|---|---|---|
-| `POST /api/v1/customers` | `401 AUTHENTICATION_REQUIRED` | `201 Created` (`accountId = req.user.id`) | N/A | `201 Created` (`accountId = req.user.id`) |
-| `GET /api/v1/customers` | `401 AUTHENTICATION_REQUIRED` | `200 OK` (Scoped to own customers) | N/A (Filtered out) | `200 OK` (All customers) |
-| `GET /api/v1/customers/:id` | `401 AUTHENTICATION_REQUIRED` | `200 OK` | `403 FORBIDDEN` (Zero data leakage) | `200 OK` |
-| `PATCH /api/v1/customers/:id` | `401 AUTHENTICATION_REQUIRED` | `200 OK` | `403 FORBIDDEN` (Record untouched) | `200 OK` (`accountId` preserved) |
-| `DELETE /api/v1/customers/:id` | `401 AUTHENTICATION_REQUIRED` | `403 FORBIDDEN` | `403 FORBIDDEN` | `204 No Content` |
-
-### 6. Standardized `401` vs. `403` Error Contract
-
-- **401 Unauthorized (`AUTHENTICATION_REQUIRED` / `INVALID_TOKEN` / `TOKEN_EXPIRED`):** Missing, malformed, tampered, or expired Bearer token.
-- **403 Forbidden (`FORBIDDEN`):** Valid authenticated identity, but insufficient role or ownership permission:
-  ```json
-  {
-    "status": "error",
-    "error": {
-      "code": "FORBIDDEN",
-      "message": "You are not authorized to perform this action"
-    }
-  }
-  ```
-
-### 7. Phase 5 Database Schema Migration (`003_add_authorization_role_and_ownership.sql`)
-
-```sql
-ALTER TABLE accounts
-ADD COLUMN IF NOT EXISTS role VARCHAR(32) NOT NULL DEFAULT 'user';
-
-ALTER TABLE accounts
-ADD CONSTRAINT chk_accounts_role CHECK (role IN ('user', 'admin'));
-
-ALTER TABLE customers
-ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL
-CONSTRAINT fk_customers_account_id REFERENCES accounts(id) ON DELETE RESTRICT;
-
-CREATE INDEX IF NOT EXISTS idx_customers_account_id ON customers (account_id);
-```
-
----
-
-## 16. Phase 6 Architecture: Relationships & Relational Domain Modeling
-
-Phase 6 establishes authoritative relational modeling, foreign key enforcement, atomic database transactions, and deterministic integer-cents financial computation across the core billing entities.
-
-### 1. Relational Domain Hierarchy
-
-```
-Account (accounts.id)
-   │ 1
-   │
-   └── 0..N Customer (customers.id, FK: customers.account_id → accounts.id)
-               │ 1
-               │
-               └── 0..N Invoice (invoices.id, FK: invoices.customer_id → customers.id ON DELETE RESTRICT)
-                           │ 1
-                           │
-                           └── 1..N InvoiceItem (invoice_items.id, FK: invoice_items.invoice_id → invoices.id ON DELETE CASCADE)
-```
-
-- **Account → Customer (`1..N`):** An authenticated `Account` owns zero or more `Customer` ledger records.
-- **Customer → Invoice (`1..N`):** Each `Invoice` belongs to exactly one `Customer` via `invoices.customer_id`. An invoice cannot exist without a valid parent customer (`404 RESOURCE_NOT_FOUND` on creation if customer does not exist).
-- **Invoice → InvoiceItem (`1..N`):** Each `Invoice` contains one or more line items (`InvoiceItem`) via `invoice_items.invoice_id`. An invoice cannot be created or updated with zero line items (`400 VALIDATION_ERROR`).
-
-### 2. Invoice & InvoiceItem Models
-
-#### Invoice (`invoices` table)
-- `id`: Internal collision-resistant identifier (`inv_<uuidv4>`, Primary Key).
-- `customerId`: Parent customer reference (`cus_<uuidv4>`, Foreign Key → `customers(id) ON DELETE RESTRICT`).
-- `invoiceNumber`: Unique human-readable billing reference (`INV-YYYY-XXXX-XXXX`, `UNIQUE` constraint).
-- `status`: Explicit lifecycle state restricted to `'draft' | 'issued' | 'paid' | 'overdue' | 'cancelled'` (Default: `'draft'`).
-- `currency`: 3-letter ISO 4217 currency code inherited from or matching the parent `Customer` currency (`CHECK (currency ~ '^[A-Z]{3}$')`).
-- `subtotal`: Authoritative server-computed sum of all line item totals (`NUMERIC(12, 2)`).
-- `tax`: Non-negative tax amount (`NUMERIC(12, 2)`, default `0`).
-- `discount`: Non-negative discount amount (`NUMERIC(12, 2)`, default `0`, cannot exceed `subtotal + tax`).
-- `total`: Authoritative server-computed net total (`subtotal + tax - discount`, `CHECK (total = subtotal + tax - discount)`).
-- `issueDate` / `dueDate`: UTC ISO 8601 timestamps (`dueDate >= issueDate`).
-- `notes`: Optional billing memo (`VARCHAR(1000)`).
-- `items`: Hydrated array of `InvoiceItem` records belonging to the invoice.
-
-#### InvoiceItem (`invoice_items` table)
-- `id`: Internal identifier (`item_<uuidv4>`, Primary Key).
-- `invoiceId`: Parent invoice reference (`inv_<uuidv4>`, Foreign Key → `invoices(id) ON DELETE CASCADE`).
-- `description`: Non-empty line item description (`1..500` characters).
-- `quantity`: Positive integer (`INTEGER`, `CHECK (quantity > 0)`).
-- `unitPrice`: Non-negative unit price (`NUMERIC(12, 2)`, `CHECK (unit_price >= 0)`).
-- `lineTotal`: Authoritative server-computed line total (`quantity * unitPrice`, `CHECK (line_total = quantity * unit_price)`).
-
-### 3. Authoritative Financial Calculation & Anti-Tampering
-
-- **Zero Client Trust for Totals:** Clients supply only `quantity`, `unitPrice`, `tax`, and `discount`. Supplying `lineTotal`, `subtotal`, `total`, or `invoiceNumber` in request payloads is rejected with `400 VALIDATION_ERROR`.
-- **Integer-Cents Precision:** All financial arithmetic in `InvoiceService` is executed in integer cents (`Math.round(amount * 100)`) before converting to two-decimal currency values, eliminating IEEE 754 floating-point drift (e.g. `3 * 19.99 + 2 * 10.05 = 80.07`).
-- **Finalized State Protection:** Once an invoice is transitioned to `'paid'` or `'cancelled'`, its `items`, `tax`, and `discount` are locked; attempts to mutate financial amounts return `409 CONFLICT`.
-
-### 4. Referential Integrity, Delete Semantics & Atomic Transactions
-
-- **Atomic Multi-Row Persistence (`BEGIN ... COMMIT / ROLLBACK`):** Creating or updating an invoice and its `invoice_items` executes inside a single PostgreSQL transaction in `PostgresInvoiceRepository`. If any line item fails a constraint, the entire transaction rolls back so no partial or itemless invoice is ever persisted.
-- **Customer Deletion Guard (`ON DELETE RESTRICT`):** Attempting to delete a `Customer` that has existing `Invoice` records is blocked by both `CustomerService` and PostgreSQL `fk_invoices_customer_id ON DELETE RESTRICT`, returning `409 CONFLICT` to preserve historical accounting records.
-- **Invoice Item Cascade (`ON DELETE CASCADE`):** When an `admin` deletes an `Invoice` (`DELETE /api/v1/invoices/:id`), all child `invoice_items` are atomically removed via `fk_invoice_items_invoice_id ON DELETE CASCADE`.
-
-### 5. Phase 6 Relational Endpoints & Authorization Policy
-
-Ownership flows transitively from `Account → Customer → Invoice → InvoiceItem`:
-
-| Endpoint | Unauthenticated | Authenticated `user` (Owner of Customer) | Authenticated `user` (Non-Owner / IDOR) | Authenticated `admin` |
-|---|---|---|---|---|
-| `POST /api/v1/customers/:id/invoices` | `401 AUTHENTICATION_REQUIRED` | `201 Created` (`Location: /api/v1/invoices/:id`) | `403 FORBIDDEN` | `201 Created` |
-| `GET /api/v1/customers/:id/invoices` | `401 AUTHENTICATION_REQUIRED` | `200 OK` (Customer's invoices + items) | `403 FORBIDDEN` | `200 OK` |
-| `POST /api/v1/invoices` | `401 AUTHENTICATION_REQUIRED` | `201 Created` | `403 FORBIDDEN` | `201 Created` |
-| `GET /api/v1/invoices` | `401 AUTHENTICATION_REQUIRED` | `200 OK` (Scoped via `JOIN customers` to own customers) | N/A (Filtered out) | `200 OK` (All invoices) |
-| `GET /api/v1/invoices/:id` | `401 AUTHENTICATION_REQUIRED` | `200 OK` (Invoice + `items[]`) | `403 FORBIDDEN` | `200 OK` |
-| `GET /api/v1/invoices/:id/items` | `401 AUTHENTICATION_REQUIRED` | `200 OK` (`InvoiceItem[]`) | `403 FORBIDDEN` | `200 OK` |
-| `PATCH /api/v1/invoices/:id` | `401 AUTHENTICATION_REQUIRED` | `200 OK` (Recalculates totals) | `403 FORBIDDEN` | `200 OK` |
-| `DELETE /api/v1/invoices/:id` | `401 AUTHENTICATION_REQUIRED` | `403 FORBIDDEN` | `403 FORBIDDEN` | `204 No Content` (Cascades items) |
-
----
-
-## 17. Phase 7 Architecture: Pagination, Filtering & Deterministic Sorting
-
-Phase 7 equips all collection endpoints with bounded offset pagination, parameterized domain filtering, and whitelisted deterministic sorting while preserving Phase 4 authentication, Phase 5 ownership/RBAC authorization, and Phase 6 relational integrity.
-
-### 1. Paginatable Collection Endpoints
-
-| Endpoint | Resource | Default Sort |
-|---|---|---|
-| `GET /api/v1/customers` | Customers | `createdAt ASC, id ASC` |
-| `GET /api/v1/invoices` | Invoices (with hydrated `items[]`) | `createdAt ASC, id ASC` |
-| `GET /api/v1/customers/:id/invoices` | Customer's Invoices (with hydrated `items[]`) | `createdAt ASC, id ASC` |
-| `GET /api/v1/invoices/:id/items` | Invoice Line Items | `createdAt ASC, id ASC` |
-
-### 2. Pagination Strategy & Bounds
-
-The API implements **1-indexed Page/Limit Offset Pagination**:
-- `page`: `1`-indexed page number (Default: `1`, Minimum: `1`, Maximum: `1,000,000`).
-- `limit`: Maximum records per page (Default: `20`, Minimum: `1`, Maximum: `100`).
-- `OFFSET` formula: `offset = (page - 1) * limit`.
-- Any invalid `page` or `limit` (`0`, negative, non-numeric, fractional, or `limit > 100`) is rejected at the validation middleware layer with `400 VALIDATION_ERROR`.
-
-#### Paginated Response Contract
-Every collection endpoint returns `data` (the array of records for the current page) alongside a top-level `pagination` metadata block:
+**Cross-Account Access / Insufficient Role (`403 Forbidden`):**
 ```json
 {
-  "status": "success",
-  "data": [ ... ],
-  "pagination": {
-    "page": 1,
-    "limit": 20,
-    "total": 45,
-    "totalPages": 3,
-    "hasNextPage": true,
-    "hasPreviousPage": false
+  "status": "error",
+  "error": {
+    "code": "FORBIDDEN",
+    "message": "You are not authorized to access this resource"
   }
 }
 ```
-- When `total === 0`, `data` is `[]`, `totalPages` is `0`, `hasNextPage` is `false`, and `hasPreviousPage` is `false`.
-- Requesting a valid page beyond `totalPages` (e.g. `?page=10&limit=20` when `total` is `5`) returns `200 OK` with `data: []` and truthful `pagination` metadata.
-
-### 3. Supported Filters & Whitelisted Sorting
-
-#### Customers (`GET /api/v1/customers`)
-- **Filters:**
-  - `currency`: Exact 3-letter uppercase ISO 4217 code (`USD`, `EUR`, `KES`).
-  - `email`: Case-insensitive exact email match (`LOWER(email) = LOWER($N)`).
-  - `name`: Case-insensitive substring match (`name ILIKE $N`).
-- **Whitelisted `sort` fields:** `createdAt`, `updatedAt`, `name`, `email`.
-- **`order` direction:** `asc` (default) or `desc`.
-
-#### Invoices (`GET /api/v1/invoices` & `GET /api/v1/customers/:id/invoices`)
-- **Filters:**
-  - `status`: One of `'draft' | 'issued' | 'paid' | 'overdue' | 'cancelled'`.
-  - `customerId`: Customer ID (`cus_<uuid>`, top-level `/api/v1/invoices` endpoint).
-  - `currency`: Exact 3-letter uppercase ISO 4217 code (`USD`, `EUR`, `KES`).
-  - `issueDate`, `issueDateFrom`, `issueDateTo`: ISO 8601 timestamp or `YYYY-MM-DD` date bounds.
-  - `dueDate`, `dueDateFrom`, `dueDateTo`: ISO 8601 timestamp or `YYYY-MM-DD` date bounds.
-- **Whitelisted `sort` fields:** `createdAt`, `updatedAt`, `issueDate`, `dueDate`, `total`, `subtotal`, `invoiceNumber`, `status`.
-- **`order` direction:** `asc` (default) or `desc`.
-
-#### Invoice Items (`GET /api/v1/invoices/:id/items`)
-- **Filters:**
-  - `description`: Case-insensitive substring match (`description ILIKE $N`).
-- **Whitelisted `sort` fields:** `createdAt`, `quantity`, `unitPrice`, `lineTotal`, `description`.
-- **`order` direction:** `asc` (default) or `desc`.
-
-### 4. SQL Injection Prevention & Authorization-First Scoping
-
-1. **Zero Raw SQL Interpolation:** Filter values, `LIMIT`, and `OFFSET` are passed exclusively as positional SQL parameters (`$1, $2, ...`).
-2. **Strict Column Whitelisting:** `sort` and `order` values are validated against compile-time whitelists and mapped through static lookup dictionaries (`CUSTOMER_SORT_COLUMN_MAP`, `INVOICE_SORT_COLUMN_MAP`, `INVOICE_ITEM_SORT_COLUMN_MAP`) with deterministic primary-key tie-breaking (`ORDER BY <column> <dir>, id <dir>`).
-3. **Authorization Scope Applied First:** For regular `user` accounts, `accountId = req.user.id` is injected server-side into both the `SELECT` query and the `COUNT(*)` query. Filtering by `?customerId=<another-users-customer>` never bypasses ownership and never leaks unauthorized records or counts.
-
-### 5. Phase 7 Database Indexes (`005_add_pagination_and_filtering_indexes.sql`)
-
-```sql
-CREATE INDEX IF NOT EXISTS idx_customers_currency ON customers (currency);
-CREATE INDEX IF NOT EXISTS idx_customers_created_at ON customers (created_at);
-
-CREATE INDEX IF NOT EXISTS idx_invoices_currency ON invoices (currency);
-CREATE INDEX IF NOT EXISTS idx_invoices_due_date ON invoices (due_date);
-CREATE INDEX IF NOT EXISTS idx_invoices_issue_date ON invoices (issue_date);
-CREATE INDEX IF NOT EXISTS idx_invoices_created_at ON invoices (created_at);
-```
 
 ---
 
-## 18. Phase 8 Architecture: Testing & Quality Engineering
+## Tech Stack
 
-Phase 8 establishes a layered, deterministic Quality Engineering and automated verification architecture across Phases 1–7 using Node.js native test runner (`node:test`) and strict assertions (`node:assert/strict`) without introducing external framework bloat.
-
-### 1. The Testing Pyramid
-
-```
-              /\
-             /  \        Layer 3: E2E / Full HTTP & Live PostgreSQL Suites
-            /----\       (http-contracts-and-security, api, validation, auth,
-           /      \       authorization, relationships, pagination, postgres)
-          /--------\     Layer 2: Service ↔ Repository ↔ Driver Integration
-         /          \    (service-repository.integration.test.ts: transactions,
-        /------------\    ROLLBACK safety, SQLSTATE mapping, N+1 batch check)
-       /              \  Layer 1: Fast Isolated Unit Tests
-      /________________\ (domain-and-services.unit.test.ts: math, pagination,
-                          validators, crypto helpers, error mapping, DB guard)
-```
-
-### 2. Test Layers & Suites
-
-| Layer | Suite File | Scope & Responsibilities Verified |
+| Layer | Technology | Role & Justification |
 |---|---|---|
-| **Shared Fixtures & Harness** | `src/test/helpers/fixtures.ts` | Deterministic builders (`buildAccountFixture`, `buildCustomerDtoFixture`, `buildInvoiceDtoFixture`, `buildInvoiceEntityFixture`), `createIsolatedHttpHarness()`, and `assertSafeTestDatabaseUrl()` safety guard. |
-| **Layer 1: Unit Tests** | `src/test/unit/domain-and-services.unit.test.ts` | `buildPaginationMeta` boundary math, domain type guards (`isValidAccountRole`, `isValidInvoiceStatus`, `toAccountDTO`), schema validators, `PasswordService` scrypt salt & malformed hash safety, `TokenService` `alg: "none"` and wrong-secret defense, IEEE-754 integer-cents invoice arithmetic, 100% discount boundary (`total === 0.00`), finalized invoice mutation locks, and `errorHandler` status/code mapping. |
-| **Layer 2: Service ↔ Repo Integration** | `src/test/integration/service-repository.integration.test.ts` | Atomic multi-table PostgreSQL transaction lifecycle (`BEGIN` → `INSERT` → `COMMIT` vs mid-item failure `ROLLBACK` + `client.release()`), PostgreSQL SQLSTATE translation (`23505` → `409 DUPLICATE_RESOURCE`, `23503` → `409 CONFLICT` / `404 RESOURCE_NOT_FOUND`, `23514` → `400 VALIDATION_ERROR`), and N+1 query elimination via batched `WHERE invoice_id = ANY($1::text[])` item hydration. |
-| **Layer 3a: HTTP Contracts & Security** | `src/test/http/http-contracts-and-security.test.ts` | Security headers (`x-powered-by` omitted, `Location` header on `201 Created`, `Content-Type: application/json`), `413 PAYLOAD_TOO_LARGE` (>100kb), SQL injection neutralization on search filters, query parameter array pollution (`?page=1&page=2`), and zero credential/hash leakage. |
-| **Layer 3b: Phase 1–7 Feature Suites** | `src/test/api.test.ts`<br>`src/test/validation.test.ts`<br>`src/test/auth.test.ts`<br>`src/test/authorization.test.ts`<br>`src/test/relationships.test.ts`<br>`src/test/pagination.test.ts` | End-to-end HTTP behavioral coverage of Customer CRUD, Schema Validation, Authentication, RBAC & IDOR Authorization, Relational Invoices/Items, and Pagination/Filtering/Sorting. |
-| **Layer 3c: Live PostgreSQL Integration** | `src/test/postgres.test.ts` | Real PostgreSQL 15 persistence: idempotent migrations (`001`–`005`), SQL-level constraints, cascade/restrict delete rules, live SQL `LIMIT`/`OFFSET` & indexed filtering, and proof that resetting `billing_system_test` never affects persistent records in `billing_system`. |
+| **Runtime** | **Node.js 22 LTS** | Native ES2022 module execution, `node:crypto` (`scrypt`, `timingSafeEqual`, `createHmac`), and native `node:test` runner. |
+| **HTTP Framework** | **Express.js 4.21** | Modular routing, bounded JSON payload parsing (`100kb`), custom security middleware, and centralized error handling. |
+| **Language** | **TypeScript (Strict Mode)** | Compile-time type safety (`strict: true`, `noImplicitAny: true`) across DTOs, domain models, services, and repositories. |
+| **Database** | **PostgreSQL 15+** | ACID transactions, `NUMERIC(12,2)` exact decimal storage, `TIMESTAMPTZ` UTC timestamps, `CHECK` constraints, and B-Tree indexes. |
+| **Database Driver** | **`pg` (`node-postgres` 8.23)** | Direct parameterized SQL queries (`$1, $2, ...`) and connection pooling (`pg.Pool`) with zero ORM overhead. |
+| **Container Runtime** | **Docker (Multi-Stage OCI)** | Minimal `node:22-bookworm-slim` production stage running compiled JS (`dist-server/`) as non-root `USER node` (`UID 1000`). |
+| **Interactive Console** | **React 19 + Tailwind CSS 4 + Vite** | Built-in API Explorer, Schema & Security Validation Lab, and live health/ledger inspector served in development and static builds. |
 
-### 3. Test Database Isolation & Repeatable Lifecycle
+---
 
-1. **Dedicated Test Database (`Development DB ≠ Test DB`):**
-   - Development database: `postgresql://postgres@localhost:5432/billing_system` (`DATABASE_URL`)
-   - Dedicated test database: `postgresql://postgres@localhost:5432/billing_system_test` (`TEST_DATABASE_URL`)
-2. **Programmatic Safety Guard (`assertSafeTestDatabaseUrl`):**
-   - Before any `TRUNCATE` executes in `src/test/postgres.test.ts`, `assertSafeTestDatabaseUrl(TEST_DATABASE_URL, process.env.DATABASE_URL)` verifies that the target database name ends with `_test` and is never identical to `DATABASE_URL`.
-3. **Repeatable Database Lifecycle:**
-   ```
-   Start Test Suite
-        ↓
-   Enforce assertSafeTestDatabaseUrl (Verify *_test DB ≠ Dev DB)
-        ↓
-   Apply Pending SQL Migrations (001..005 via runMigrations)
-        ↓
-   Reset Test Tables (TRUNCATE invoice_items, invoices, customers, accounts CASCADE)
-        ↓
-   Seed Controlled Fixtures & Execute Tests
-        ↓
-   Close HTTP Server & Drain pg.Pool (testPool.end())
-   ```
+## Getting Started
 
-### 4. Running the Test Suites
+### Prerequisites
+
+- **Node.js** `v22.0.0` or higher
+- **PostgreSQL** `v15.0` or higher
+- **Docker** & **Docker Compose** (optional, for containerized execution)
+
+### 1. Clone & Install Dependencies
 
 ```bash
-# Run all fast Unit, Service-Repository Integration, HTTP Security, and Phase 1–9 Contract suites
-npm test
-
-# Run individual test layers
-npm run test:unit                  # Layer 1: Isolated unit tests
-npm run test:service-integration   # Layer 2: Service ↔ Repository transaction & SQLSTATE integration tests
-npm run test:http                  # Layer 3a: HTTP contract, 413 limit & security regression tests
-npm run test:security              # Phase 9 security hardening test suite
-npm run test:validation            # Phase 3 validation suite
-npm run test:auth                  # Phase 4 authentication suite
-npm run test:authorization         # Phase 5 authorization & IDOR suite
-npm run test:relationships         # Phase 6 relational domain suite
-npm run test:pagination            # Phase 7 pagination, filtering & sorting suite
-
-# Run live PostgreSQL database integration suite (requires PostgreSQL with billing_system_test DB)
-npm run test:integration
-
-# Run the entire test pyramid including live PostgreSQL integration tests
-npm run test:all
+git clone <repository-url>
+cd billing-system-api
+npm install
 ```
 
----
+### 2. Configure Environment Variables
 
-## 19. Phase 9 Architecture: Security Hardening
-
-Phase 9 hardens the Billing System REST API against concrete application-level threats across authentication, authorization, input validation, rate limiting, HTTP transport headers, CORS, method handling, secret management, and log redaction while preserving the layered architecture from Phases 1–8.
-
-### 1. Threat Model
-
-| Threat Actor | Trust Level | Primary Attack Vectors | Mitigations Enforced |
-|---|---|---|---|
-| **Anonymous Attacker** | Unauthenticated (`none`) | Brute-force login guessing, registration flooding, SQL injection in query/body fields, oversized payload DoS, malformed JWT / `alg: "none"` forgery, unsupported HTTP method probing. | `createAuthRateLimiter` (`429 RATE_LIMIT_EXCEEDED`), `createApiRateLimiter`, `scrypt` memory-hard hashing + dummy verification, `express.json({ limit: '100kb' })` (`413`), strict `HS256` signature & header validation (`401`), `405 METHOD_NOT_ALLOWED`. |
-| **Normal Authenticated User** | Valid `role: 'user'` JWT | Horizontal privilege escalation (IDOR) against another account's customers/invoices/items, cross-account `?customerId=` filter enumeration, vertical privilege escalation (`{"role": "admin"}`), mass assignment of `accountId`/`total`/`subtotal`. | Server-side `accountId === req.user.id` ownership checks on every read/write/nested route (`403 FORBIDDEN`), authorization-first SQL `WHERE` scoping on `SELECT` and `COUNT(*)`, strict schema field whitelists (`400 VALIDATION_ERROR`). |
-| **Malicious / Compromised Privileged User** | Valid `role: 'admin'` JWT | Attempting to corrupt financial math, bypass finalized (`paid`/`cancelled`) invoice locks, inject SQL via sort/filter parameters, or extract password hashes/secrets from responses. | Server-computed integer-cents financial math, `409 CONFLICT` lock on finalized invoices, parameterized SQL + static column whitelist maps, complete omission of `passwordHash` and secrets from all DTOs and error responses. |
-
-### 2. Defense-in-Depth Controls
-
-#### A. Brute-Force & Request Rate Limiting (`src/api/middlewares/rate-limit.middleware.ts`)
-- **Authentication Rate Limiter (`createAuthRateLimiter`):**
-  - Applied to `POST /api/v1/auth/login` and `POST /api/v1/auth/register`.
-  - Default window: `60,000 ms` (`AUTH_RATE_LIMIT_WINDOW_MS`), default max: `30` requests per IP per endpoint (`AUTH_RATE_LIMIT_MAX`).
-- **General API Rate Limiter (`createApiRateLimiter`):**
-  - Applied to `/api/v1/*` routes to guard against runaway client loops and high-rate floods.
-  - Default window: `60,000 ms` (`API_RATE_LIMIT_WINDOW_MS`), default max: `300` requests per IP (`API_RATE_LIMIT_MAX`).
-- **Response Contract & Memory Safety:**
-  - Emits `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` on every response.
-  - Returns `429 Too Many Requests` (`code: 'RATE_LIMIT_EXCEEDED'`) with a standard `Retry-After` header when exceeded.
-  - Bounds internal tracking map to `MAX_TRACKED_KEYS = 10,000` with automatic expired-bucket eviction.
-
-#### B. Authentication, Password & Token Hardening (`src/api/services/token.service.ts` & `auth.schema.ts`)
-- **Password Policy & CPU Amplification Defense:**
-  - Enforces `8..128` characters on both registration **and** login (`validateLoginBody`), blocking oversized multi-kilobyte password payloads from amplifying `scrypt` CPU work.
-  - Rejects null bytes (`\u0000`) and whitespace-only passwords with `400 VALIDATION_ERROR`.
-- **JWT Algorithm & Claim Hardening:**
-  - Explicitly verifies `header.alg === 'HS256'` and `header.typ === 'JWT'` alongside `crypto.timingSafeEqual` HMAC-SHA256 verification, defeating `alg: "none"` and algorithm-confusion attacks.
-  - Enforces `MAX_TOKEN_LENGTH = 4096` bytes before parsing/hashing.
-  - Validates `sub`, `email`, `role` (`'user' | 'admin'`), `iat`, and `exp` claims.
-- **Production Fail-Closed Secret Validation (`resolveAndValidateJwtSecret`):**
-  - When `NODE_ENV === 'production'`, startup fails closed with `SecurityConfigurationError` if `JWT_SECRET` is unset, shorter than 32 characters, or set to a placeholder (`MY_JWT_SECRET`, `changeme`, or the development fallback key).
-
-#### C. Input Validation, Mass Assignment, Null-Byte & Prototype Pollution Protection
-- All body and query validators inspect `Object.getOwnPropertyNames` and explicitly reject `__proto__`, `constructor`, `prototype`, and any unrecognized or server-computed fields (`id`, `accountId`, `role`, `subtotal`, `total`, `lineTotal`, `invoiceNumber`, `createdAt`, `updatedAt`) with `400 VALIDATION_ERROR`.
-- All string inputs (`name`, `email`, `password`, `description`, `notes`) reject null bytes (`\u0000`) at the validation boundary before reaching PostgreSQL UTF-8 drivers.
-
-#### D. HTTP Security Headers, Conditional HSTS, CORS & `405 Method Not Allowed`
-- **Security Headers (`src/api/middlewares/security-headers.middleware.ts`):**
-  - `X-Powered-By`: Disabled (`app.disable('x-powered-by')`).
-  - `X-Content-Type-Options: nosniff`
-  - `X-Frame-Options: DENY`
-  - `Referrer-Policy: no-referrer`
-  - `Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=()`
-  - `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` (on `/api/*`)
-  - `Cache-Control: no-store` and `Pragma: no-cache` (on `/api/*`)
-  - `Strict-Transport-Security: max-age=31536000; includeSubDomains` emitted **only** when `NODE_ENV === 'production'` or `ENABLE_HSTS === 'true'`.
-- **Restrictive CORS Policy (`src/api/middlewares/cors.middleware.ts`):**
-  - Denies cross-origin browser access by default when `CORS_ALLOWED_ORIGINS` is empty.
-  - Grants `Access-Control-Allow-Origin` only to origins explicitly listed in `CORS_ALLOWED_ORIGINS` (never reflects arbitrary origins or `*`).
-- **HTTP Method Hardening (`src/api/middlewares/method-not-allowed.middleware.ts`):**
-  - Unsupported HTTP verbs on known routes (`/api/v1/health`, `/api/v1/auth/*`, `/api/v1/customers*`, `/api/v1/invoices*`) return `405 Method Not Allowed` (`code: 'METHOD_NOT_ALLOWED'`) with an RFC 9110 `Allow` header.
-
-#### E. Logging Redaction & Database Security (`src/api/security/redaction.ts`)
-- `redactSensitiveUrl` and `redactSensitiveText` strip CRLF characters (`\r`, `\n`) to prevent log injection and automatically redact `password`, `token`, `secret`, `Bearer <jwt>`, `scrypt$...` hashes, and `postgresql://user:pass@host` connection strings from request and operational error logs.
-- **Recommended Production Database Privilege Posture:**
-  - Run schema migrations (`npm run migrate`) using a migration/DDL role, and run the Express API process using a least-privilege application role granted only `SELECT, INSERT, UPDATE, DELETE` on `accounts, customers, invoices, invoice_items` (without `DROP`, `ALTER`, or `SUPERUSER` privileges).
-
-### 3. Security Environment Variables
-
-| Variable | Default (Dev) | Purpose |
-|---|---|---|
-| `JWT_SECRET` | Dev fallback (Fails closed in `production`) | HMAC-SHA256 signing secret (minimum 32 characters required in production). |
-| `JWT_EXPIRES_IN` | `86400` (24h) | JWT expiration window in seconds. |
-| `AUTH_RATE_LIMIT_WINDOW_MS` | `60000` (60s) | Window duration for `/api/v1/auth/login` and `/register` rate limiting. |
-| `AUTH_RATE_LIMIT_MAX` | `30` | Maximum auth attempts per window per client IP + route. |
-| `API_RATE_LIMIT_WINDOW_MS` | `60000` (60s) | Window duration for general `/api/v1/*` rate limiting. |
-| `API_RATE_LIMIT_MAX` | `300` | Maximum general API requests per window per client IP. |
-| `CORS_ALLOWED_ORIGINS` | `""` (Disabled) | Comma-separated list of allowed browser origins for CORS. |
-| `ENABLE_HSTS` | `"false"` (`"true"` in `production`) | Controls emission of `Strict-Transport-Security` header. |
-
-### 4. Known Security Limitations
-1. **Process-Local Rate Limiting:** Rate limit counters reside in process memory (`Map`). In a multi-instance horizontal deployment (Phase 13), limits apply per Node.js process unless backed by a shared store or upstream reverse proxy.
-2. **Stateless JWT Revocation:** Stateless JWTs remain valid until `exp` unless signing keys are rotated. Short expiration windows (`JWT_EXPIRES_IN`) are recommended in production.
-3. **TLS Termination:** HTTPS/TLS termination is assumed to be handled by the reverse proxy or cloud load balancer in production deployments.
-
----
-
-## 20. Phase 10 Architecture: Docker & Containerization
-
-Phase 10 packages the Billing System REST API into a reproducible, minimal, non-root production container image while keeping PostgreSQL stateful storage strictly externalized.
-
-### 1. Containerization Architecture
-
-```
-+-----------------------------------------------------------------------+
-| Docker Bridge Network (billing_net)                                   |
-|                                                                       |
-|  +---------------------------------+     TCP :5432 (pg.Pool)          |
-|  | API Container (Stateless)       | ------------------------------>  |
-|  | Image: node:22-bookworm-slim    |                                  |
-|  | User:  node (UID 1000, non-root)|     +-------------------------+  |
-|  | Rootfs: read-only (/tmp tmpfs)  |     | PostgreSQL 15 Container |  |
-|  | Entry: node dist-server/server.js|    | Image: postgres:15      |  |
-|  | Health: GET /api/v1/health      |     | Volume: billing_pgdata  |  |
-|  +---------------------------------+     +-------------------------+  |
-+-----------------------------------------------------------------------+
-```
-
-### 2. Multi-Stage `Dockerfile` Design
-
-| Stage | Base Image | Responsibilities | Excluded from Final Image |
-|---|---|---|---|
-| **Stage 1: `builder`** | `node:22-bookworm-slim` | Installs full dependencies (including `devDependencies`), runs `npm run lint` (`tsc --noEmit` + `tsc -p tsconfig.server.json --noEmit`), and runs `npm run build` (`vite build` → `dist/` and `tsc -p tsconfig.server.json` → `dist-server/`). | TypeScript compiler (`typescript`), `tsx`, `esbuild`, `@types/*`, raw `.ts`/`.tsx` source files, and test suites. |
-| **Stage 2: `runtime`** | `node:22-bookworm-slim` | Installs production-only dependencies (`npm install --omit=dev`), copies compiled `dist/`, `dist-server/`, `migrations/*.sql`, and `.env.example`, switches to `USER node` (UID 1000), configures `HEALTHCHECK`, and launches `CMD ["node", "dist-server/server.js"]`. | `.env` secrets, `.git` history, `src/`, `tsconfig*.json`, `Dockerfile`, and npm cache. |
-
-### 3. Production Server Compilation (`tsconfig.server.json`)
-- Compiles `server.ts` and `src/api/**/*.ts` to native ES2022 NodeNext JavaScript under `dist-server/`.
-- In `NODE_ENV=production`, `server.ts` skips loading Vite dev middleware completely and serves compiled static assets from `dist/` alongside `/api/v1/*` REST endpoints.
-- `dist-server/src/api/db/migrate.js` executes versioned SQL migrations (`001`–`005`) using pure Node.js without requiring `tsx` or `typescript` in the production container.
-
-### 4. Container Security & Lifecycle Guarantees
-1. **Non-Root Execution (`USER node`):** The container process runs as UID `1000` (`node`), preventing container root privilege escalation.
-2. **Read-Only Root Filesystem:** Compatible with `read_only: true` (`--read-only --tmpfs /tmp`) in `docker-compose.yml` and Kubernetes/Cloud Run.
-3. **Zero Baked-In Secrets:** `.dockerignore` blocks `.env` and `.env.*` (except `.env.example`) from entering the build context. `DATABASE_URL` and `JWT_SECRET` are injected strictly at runtime.
-4. **Fail-Closed Startup:** Starting the production container in `NODE_ENV=production` without a valid `JWT_SECRET` (>= 32 chars) immediately fails closed with a non-zero exit code.
-5. **PID 1 Signal Handling & Graceful Shutdown:** `CMD ["node", "dist-server/server.js"]` uses exec form so `node` runs as PID 1, catches `SIGTERM`/`SIGINT`, stops accepting new HTTP connections, drains `pg.Pool`, and exits cleanly with code `0`.
-
-### 5. Docker & Compose Commands
+Copy the template environment file and supply your local or production values:
 
 ```bash
-# 1. Build production container image directly
-docker build -t billing-system-api:phase10 .
+cp .env.example .env
+```
 
-# 2. Run migrations using compiled production runner
-docker run --rm \
-  --network billing_net \
-  -e DATABASE_URL="postgresql://postgres:postgres_local_dev_only@postgres:5432/billing_system" \
-  billing-system-api:phase10 \
-  node dist-server/src/api/db/migrate.js
+| Variable | Category | Required in Prod | Default | Description |
+|---|---|---|---|---|
+| `DATABASE_URL` | **Secret** | **Yes** | — | PostgreSQL connection URI (`postgresql://<user>:<password>@<host>:5432/<dbname>`). Fails closed if unset in `production`. |
+| `JWT_SECRET` | **Secret** | **Yes** | — | High-entropy HMAC-SHA256 signing secret (`>= 32` characters). Fails closed in `production` if missing, weak, or set to a placeholder. |
+| `NODE_ENV` | **Config** | **Yes** | `development` | Runtime environment (`development` or `production`). |
+| `PORT` | **Config** | **Yes** | `3000` | HTTP server listening port. |
+| `HOST` | **Config** | Optional | `0.0.0.0` | Network interface bind address. |
+| `TRUST_PROXY` | **Config** | Optional | `1` (in prod) | Enables Express `trust proxy` (`1` hop) when deployed behind a TLS-terminating load balancer. |
+| `CORS_ALLOWED_ORIGINS` | **Config** | Optional | `""` | Comma-separated allowlist of trusted browser origins. Empty string disables cross-origin access. |
+| `ENABLE_HSTS` | **Config** | Optional | `false` (`true` in prod) | Emits `Strict-Transport-Security: max-age=31536000; includeSubDomains`. |
+| `JWT_EXPIRES_IN` | **Optional** | Optional | `86400` | JWT expiration lifetime in seconds (24 hours). |
+| `AUTH_RATE_LIMIT_WINDOW_MS` | **Optional** | Optional | `60000` | Rate-limit window in milliseconds for `/api/v1/auth/login` and `/register`. |
+| `AUTH_RATE_LIMIT_MAX` | **Optional** | Optional | `30` | Maximum authentication requests per window per client IP. |
+| `API_RATE_LIMIT_WINDOW_MS` | **Optional** | Optional | `60000` | Rate-limit window in milliseconds for general `/api/v1/*` endpoints. |
+| `API_RATE_LIMIT_MAX` | **Optional** | Optional | `300` | Maximum general API requests per window per client IP. |
 
-# 3. Run stateless API container with injected runtime configuration
-docker run -d \
-  --name billing-api \
-  --network billing_net \
-  --read-only \
-  --tmpfs /tmp \
-  -p 3000:3000 \
-  -e NODE_ENV="production" \
-  -e PORT="3000" \
-  -e DATABASE_URL="postgresql://postgres:postgres_local_dev_only@postgres:5432/billing_system" \
-  -e JWT_SECRET="replace-with-32-byte-minimum-cryptographic-secret-key" \
-  billing-system-api:phase10
+> **Security Note:** Never commit `.env` files or real secrets to version control. `.gitignore` and `.dockerignore` strictly exclude `.env*` files from Git history and Docker build contexts.
 
-# 4. Or orchestrate local API + PostgreSQL 15 together via Docker Compose
+### 3. Apply Database Migrations
+
+The transactional migration runner (`src/api/db/migrate.ts`) tracks applied SQL files in the `schema_migrations` table and safely skips already-applied migrations:
+
+```bash
+# Development (TypeScript via tsx)
+npm run migrate
+
+# Production (Compiled JavaScript)
+npm run build
+npm run migrate:prod
+```
+
+### 4. Run the Application
+
+```bash
+# Start in development mode (Express API + Vite middleware on http://localhost:3000)
+npm run dev
+
+# Build and start in production mode (Compiled dist-server/server.js + static dist/)
+npm run build
+npm run start:prod
+
+# Run the complete pre-flight release & migration pipeline
+npm run deploy:release
+```
+
+### 5. Run with Docker & Docker Compose
+
+```bash
+# Start the local PostgreSQL 15 + API container stack
 docker compose up --build -d
-docker compose ps
-docker compose logs -f api
+
+# Apply pending SQL migrations inside the running API container
+docker compose exec api node dist-server/src/api/db/migrate.js
+
+# Verify container health
+curl -i http://localhost:3000/api/v1/health
+
+# Tear down the stack
 docker compose down
 ```
 
 ---
 
-## 21. Phase 11 Architecture: Production Deployment & Cloud Hosting
+### Verification & Testing
 
-Phase 11 deploys the containerized Billing System REST API to **Google Cloud Run** (`europe-west2`) backed by a dedicated **PostgreSQL 15 production database (`billing_system_prod`)**.
-
-### 1. Selected Deployment Platform: Google Cloud Run
-
-Google Cloud Run (`serving.knative.dev/v1`) was selected as the single authoritative hosting target because:
-1. **Native OCI/Docker Container Execution:** Runs the exact Phase 10 multi-stage `Dockerfile` (`runtime` stage, Node.js 22 slim, compiled `dist-server/server.js`, non-root `USER node` UID 1000, read-only root filesystem) without architectural modifications.
-2. **Managed TLS/HTTPS Termination:** Automatically provisions and renews TLS certificates on `.run.app` domains, terminating HTTPS at the Google Front End (GFE) edge and forwarding `X-Forwarded-Proto: https` and `X-Forwarded-For` to the container (`TRUST_PROXY=1`).
-3. **Runtime Secret Injection:** Injects `DATABASE_URL` and `JWT_SECRET` at container runtime from Secret Manager (`secretKeyRef`), keeping zero credentials in Git or Docker image layers.
-4. **Truthful HTTP + PostgreSQL Probes:** Configures `startupProbe` and `livenessProbe` against `GET /api/v1/health`, which executes a live `SELECT 1` query against PostgreSQL (`200 OK` when healthy, `503 Service Unavailable` when degraded).
-5. **Immutable Revision Rollback:** Every deployment produces an immutable revision (`K_REVISION`), allowing instant zero-downtime traffic rollback if a deployment fails verification.
-
-### 2. Three-Way PostgreSQL Database Separation
-
-Production data is strictly isolated from local development and automated test databases (`assertSafeProductionDatabaseUrl` in `src/api/db/pool.ts`):
-
-| Environment | Database Name | Purpose & Safety Guarantees |
-|---|---|---|
-| **Development** | `billing_system` | Local interactive development (`npm run dev`). Never used by automated test `TRUNCATE` fixtures or production traffic. |
-| **Automated Test** | `billing_system_test` | Isolated integration & container runtime testing (`npm run test:integration`, `npm run test:docker`). Enforced by `assertSafeTestDatabaseUrl` (must end with `_test`). |
-| **Production** | `billing_system_prod` | Live production persistence (`npm run deploy:release`, `npm run start:prod`). Enforced by `assertSafeProductionDatabaseUrl` (rejects `*_test` and `billing_system`, never touched by test `TRUNCATE` fixtures). |
-
-### 3. Production Environment Variable Inventory
-
-| Variable | Category | Required in Prod | Default | Purpose |
-|---|---|---|---|---|
-| `DATABASE_URL` | **Secret** | **Yes** (Fails closed if missing) | — | PostgreSQL connection URI (`postgresql://<user>:<password>@<host>:5432/billing_system_prod`). |
-| `JWT_SECRET` | **Secret** | **Yes** (Fails closed if `< 32` chars or placeholder) | — | High-entropy cryptographic HMAC-SHA256 signing key (`>= 32` chars). |
-| `NODE_ENV` | **Configuration** | **Yes** | `production` | Enables fail-closed secret & DB checks, static asset serving, `trust proxy`, and HSTS. |
-| `PORT` | **Configuration** | **Yes** | `3000` | TCP listening port injected by the hosting platform. |
-| `HOST` | **Configuration** | Optional | `0.0.0.0` | Network interface bind address for container ingress. |
-| `TRUST_PROXY` | **Configuration** | Optional | `1` (in prod) | Enables Express `trust proxy` (`1` hop) behind Cloud Run / Nginx TLS proxies. |
-| `CORS_ALLOWED_ORIGINS` | **Configuration** | Optional | `""` (Deny cross-origin) | Comma-separated explicit origin allowlist. Never allows wildcard `*`. |
-| `ENABLE_HSTS` | **Configuration** | Optional | `true` (in prod) | Emits `Strict-Transport-Security: max-age=31536000; includeSubDomains`. |
-| `JWT_EXPIRES_IN` | **Optional Config** | Optional | `86400` | JWT token lifetime in seconds (24 hours). |
-| `AUTH_RATE_LIMIT_WINDOW_MS` | **Optional Config** | Optional | `60000` | Rate-limit window (ms) for `/api/v1/auth/login` and `/register`. |
-| `AUTH_RATE_LIMIT_MAX` | **Optional Config** | Optional | `30` | Max authentication requests per window per client IP. |
-| `API_RATE_LIMIT_WINDOW_MS` | **Optional Config** | Optional | `60000` | Rate-limit window (ms) for general `/api/v1/*` routes. |
-| `API_RATE_LIMIT_MAX` | **Optional Config** | Optional | `300` | Max general API requests per window per client IP. |
-
-### 4. Production Release, Migration & Rollback Runbook
+The repository enforces three-way database isolation (`Development DB ≠ Automated Test DB ≠ Production DB`) via programmatic guards (`assertSafeTestDatabaseUrl` and `assertSafeProductionDatabaseUrl`) and includes **212 automated tests across 13 suites**:
 
 ```bash
-# 1. Execute pre-flight secret & DB isolation checks, build artifacts, and apply pending SQL migrations
-npm run deploy:release
+# TypeScript strict type-checking (client + server)
+npm run lint
 
-# 2. Start compiled production server (or deploy container revision to Cloud Run)
-npm run start:prod
+# Fast unit, service-repository transaction, HTTP contract, validation, auth, RBAC, relational, pagination & security suites (179 tests)
+npm test
 
-# 3. Verify live health endpoint
-curl -i https://<service-url>/api/v1/health
+# Live PostgreSQL 15 integration suite against dedicated *_test database (22 tests)
+npm run test:integration
 
-# 4. Rollback to prior known-good revision if post-deploy verification fails
-gcloud run services update-traffic billing-system-api \
-  --region=europe-west2 \
-  --to-revisions=<PREVIOUS_REVISION>=100
+# Multi-stage Docker runtime, non-root execution, read-only rootfs & SIGTERM suite (6 tests)
+npm run test:docker
+
+# Production deployment, DB separation, migration idempotency & HTTPS/TLS live verification suite (5 tests)
+npm run test:deploy
+
+# Execute the complete 13-suite verification pyramid (212 tests)
+npm run test:all
 ```
 
+---
 
+## Project Status
 
+**Status:** **Production-Ready (`v1.0.0`)**
 
+| Capability Area | Status | Verification Coverage |
+|---|---|---|
+| **REST API Contract & Standardized Errors** | Complete | `api.test.ts`, `validation.test.ts`, `http-contracts-and-security.test.ts` |
+| **PostgreSQL Persistence & Transactional Migrations (`001`–`005`)** | Complete | `postgres.test.ts`, `service-repository.integration.test.ts` |
+| **Stateless JWT Authentication & `scrypt` Password Hashing** | Complete | `auth.test.ts`, `domain-and-services.unit.test.ts` |
+| **RBAC (`user` / `admin`) & Cross-Account IDOR Prevention** | Complete | `authorization.test.ts`, `security.test.ts` |
+| **Relational Invoicing (`Customer → Invoice → InvoiceItem`)** | Complete | `relationships.test.ts`, `service-repository.integration.test.ts` |
+| **Offset Pagination, Filtering & Whitelisted Sorting** | Complete | `pagination.test.ts`, `postgres.test.ts` |
+| **Rate Limiting, Security Headers, HSTS, CORS & Log Redaction** | Complete | `security.test.ts` |
+| **Multi-Stage Docker Image & Cloud Run Deployment Configuration** | Complete | `docker-runtime.test.ts`, `deployment.test.ts` |
 
+---
 
+## Roadmap
 
+- [x] **Core Customer & Account Ledger** — Versioned REST endpoints, strict input validation, and PostgreSQL persistence.
+- [x] **Authentication & RBAC Authorization** — `scrypt` password hashing, `HS256` JWT Bearer tokens, and ownership-scoped access control.
+- [x] **Transactional Invoicing Engine** — Multi-item invoices, integer-cents financial math, and `ON DELETE RESTRICT` / `CASCADE` integrity.
+- [x] **Collection Pagination & Filtering** — Indexed filtering, whitelisted sorting, and deterministic pagination metadata.
+- [x] **Security Hardening & Containerization** — Rate limiting, defensive HTTP headers, log redaction, and non-root multi-stage Docker runtime.
+- [ ] **Payment Recording & Ledger Reconciliation** — Partial and full payment transactions against issued invoices with automatic transition to `paid`.
+- [ ] **Credit Notes & Refund Workflows** — Auditable post-issuance adjustments preserving immutable historical invoice records.
+- [ ] **Recurring Billing & Subscription Schedules** — Automated billing cycle generation and overdue invoice state transitions.
+- [ ] **Signed Outbound Webhooks** — HMAC-signed event delivery (`invoice.issued`, `invoice.paid`, `invoice.overdue`) with exponential backoff retries.
+- [ ] **OpenAPI 3.1 Specification & Distributed Rate Limiting** — Machine-readable OpenAPI schema export and optional Redis-backed rate-limit store for multi-instance horizontal scaling.
+
+---
+
+## License
+
+Distributed under the **MIT License**.
+
+```text
+MIT License
+
+Copyright (c) 2026 Billing System Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE(S) FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
