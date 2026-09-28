@@ -18,10 +18,11 @@ import { RateLimitExceededError, SecurityConfigurationError } from '../services/
  *   (`MAX_TRACKED_KEYS = 10,000`) to prevent per-process memory exhaustion from spoofed keys.
  *
  * Production Global Enforcement Integration Points:
- * 1. Edge / API Gateway Enforcement (`RATE_LIMIT_MODE=edge_enforced`):
- *    Recommended for Google Cloud Run deployments behind Google Cloud Armor, Cloud API Gateway,
- *    or an upstream WAF/CDN that enforces global rate limits at the network edge while this
- *    middleware provides a per-instance safety ceiling.
+ * 1. Edge Enforcement (`RATE_LIMIT_MODE=edge_enforced`):
+ *    Configure a load balancer, WAF, or gateway to enforce global rate limits. For the
+ *    production Cloud Run path, Cloud Armor on an external Application Load Balancer provides
+ *    that enforcement while this middleware provides a per-instance safety ceiling. This mode
+ *    alone does not configure or activate an edge policy.
  * 2. Pluggable Shared Store (`RATE_LIMIT_MODE=shared_store` + `RateLimitStore`):
  *    Inject a shared `RateLimitStore` implementation (e.g., Redis / Cloud Memorystore / PostgreSQL
  *    adapter) via `RateLimitOptions.store` or `AppDependencies.rateLimitStore` for strict global
