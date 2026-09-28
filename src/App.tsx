@@ -547,11 +547,19 @@ export default function App() {
                   Billing System REST API
                 </span>
                 <span className="px-2 py-0.5 rounded text-[11px] font-semibold uppercase tracking-wider bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-                  Phase 11: Production Deployment & Hosting
+                  Phase 14: Public API Release v1.0.0
                 </span>
+                <a
+                  href="/openapi.yaml"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-2 py-0.5 rounded text-[11px] font-mono bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 transition"
+                >
+                  OpenAPI 3.1.0
+                </a>
               </div>
               <p className="text-xs text-slate-400">
-                Relational Ledger (Customer → Invoice → InvoiceItem), RBAC/IDOR, Pagination, Security Hardening, Docker & Cloud Run Production Hosting
+                Relational Ledger, RBAC/IDOR, Pagination, Security Hardening, Docker, Cloud Run, Observability, Scaling & OpenAPI 3.1
               </p>
             </div>
           </div>
@@ -1165,11 +1173,11 @@ export default function App() {
                     <span>Schema Validation, Security Hardening & Container Runtime Lab</span>
                   </h2>
                   <p className="text-xs text-slate-400 mt-1">
-                    Directly test authentication contracts, RBAC/IDOR boundaries, pagination & filter guards, HTTP security headers, and structured error responses across Phases 1–11.
+                    Directly test authentication contracts, RBAC/IDOR boundaries, pagination & filter guards, HTTP security headers, and structured error responses across Phases 1–12.
                   </p>
                 </div>
                 <span className="px-2.5 py-1 rounded bg-indigo-500/10 text-indigo-300 text-xs font-mono border border-indigo-500/20">
-                  212 Automated Tests Passing (13 Suites)
+                  242 Automated Tests Passing (16 Suites)
                 </span>
               </div>
             </div>
@@ -1529,7 +1537,7 @@ PostgreSQL 15 Production Pool (pg.Pool → billing_system_prod)
             <div className="bg-slate-900/60 p-6 rounded-xl border border-slate-800 space-y-4">
               <h2 className="text-base font-semibold text-white flex items-center gap-2">
                 <Database className="w-5 h-5 text-indigo-400" />
-                <span>PostgreSQL Versioned Schema Migrations (001–005)</span>
+                <span>PostgreSQL Versioned Schema & Scaling Migrations (001–006)</span>
               </h2>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1551,19 +1559,15 @@ CREATE TABLE accounts (
                 </div>
 
                 <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 font-mono text-xs">
-                  <div className="text-slate-400 font-bold mb-2">003, 004 & 005: RBAC, Invoices & Indexes</div>
+                  <div className="text-slate-400 font-bold mb-2">003–006: RBAC, Invoices & Composite Scaling Indexes</div>
                   <pre className="text-indigo-300 text-[11px] overflow-x-auto">{`-- 003: accounts.role ('user'|'admin') & customers.account_id
 -- 004: invoices (ON DELETE RESTRICT) & invoice_items (CASCADE)
-CREATE TABLE invoices (
-  id TEXT PRIMARY KEY,
-  account_id TEXT NOT NULL REFERENCES accounts(id),
-  customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
-  invoice_number VARCHAR(64) NOT NULL,
-  status VARCHAR(20) NOT NULL,
-  subtotal NUMERIC(12,2) NOT NULL,
-  total NUMERIC(12,2) NOT NULL
-);
--- 005: B-Tree indexes on currency, status, issue_date, due_date, created_at`}</pre>
+-- 005: B-Tree indexes on currency, status, issue_date, due_date, created_at
+-- 006: Composite & functional indexes for O(log N) tenant pagination:
+CREATE UNIQUE INDEX idx_invoices_invoice_number_upper ON invoices (UPPER(invoice_number));
+CREATE INDEX idx_customers_account_created_id ON customers (account_id, created_at, id);
+CREATE INDEX idx_invoices_customer_status_created_id ON invoices (customer_id, status, created_at, id);
+CREATE INDEX idx_invoice_items_invoice_created_id ON invoice_items (invoice_id, created_at, id);`}</pre>
                 </div>
               </div>
             </div>

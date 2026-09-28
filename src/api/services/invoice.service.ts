@@ -24,6 +24,7 @@ import {
   AuthenticationRequiredError,
   ForbiddenError,
   ConflictError,
+  DuplicateResourceError,
 } from './errors.js';
 
 /**
@@ -60,10 +61,10 @@ export class InvoiceService {
 
   /**
    * Generates a unique human-readable invoice number.
-   * Format: `INV-<YYYY>-<6-digit-seq>-<4-hex>`
+   * Format: `INV-<YYYY>-<4-digit-seq>-<4-hex>`
    */
   private generateInvoiceNumber(issueDateIso: string): string {
-    this.sequenceCounter += 1;
+    this.sequenceCounter = (this.sequenceCounter % 9999) + 1;
     const year = new Date(issueDateIso).getUTCFullYear();
     const seq = String(this.sequenceCounter).padStart(4, '0');
     const suffix = randomBytes(2).toString('hex').toUpperCase();
@@ -196,10 +197,13 @@ export class InvoiceService {
     // Enforce customer ownership BEFORE executing query (IDOR protection -> 403 FORBIDDEN)
     this.assertCanAccessCustomer(actor, customer);
 
+    // Ownership of `customerId` is already verified above; omit `accountId` so the
+    // repository executes an index-only/composite-indexed scan on `invoices(customer_id, ...)`
+    // without a redundant `INNER JOIN customers` on COUNT(*) and SELECT.
     const scopedQuery: InvoiceListQuery = {
       ...query,
       customerId,
-      accountId: actor.role === 'admin' ? undefined : actor.id,
+      accountId: undefined,
     };
 
     if (this.invoiceRepo.findPaginated) {
@@ -334,25 +338,37 @@ export class InvoiceService {
       );
     }
 
-    const invoice: Invoice = {
-      id: invoiceId,
-      customerId: customer.id,
-      invoiceNumber: this.generateInvoiceNumber(issueDateIso),
-      status,
-      currency,
-      subtotal: this.fromCents(subtotalCents),
-      tax: this.fromCents(taxCents),
-      discount: this.fromCents(discountCents),
-      total: this.fromCents(totalCents),
-      issueDate: issueDateIso,
-      dueDate: dueDateIso,
-      notes: dto.notes ?? null,
-      items,
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    };
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const invoice: Invoice = {
+        id: invoiceId,
+        customerId: customer.id,
+        invoiceNumber: this.generateInvoiceNumber(issueDateIso),
+        status,
+        currency,
+        subtotal: this.fromCents(subtotalCents),
+        tax: this.fromCents(taxCents),
+        discount: this.fromCents(discountCents),
+        total: this.fromCents(totalCents),
+        issueDate: issueDateIso,
+        dueDate: dueDateIso,
+        notes: dto.notes ?? null,
+        items,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
 
-    return this.invoiceRepo.create(invoice);
+      try {
+        return await this.invoiceRepo.create(invoice);
+      } catch (err) {
+        if (err instanceof DuplicateResourceError && attempt < maxAttempts) {
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    throw new DuplicateResourceError('Failed to generate a unique invoice number after retries');
   }
 
   async updateInvoice(

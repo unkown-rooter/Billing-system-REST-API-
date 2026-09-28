@@ -8,6 +8,7 @@ import {
 declare global {
   namespace Express {
     interface Request {
+      requestId?: string;
       user?: AuthenticatedUser;
       validatedCustomerQuery?: CustomerListQuery;
       validatedInvoiceQuery?: InvoiceListQuery;

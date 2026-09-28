@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import express from 'express';
 import { createApp } from './src/api/app.js';
 import { closePool } from './src/api/db/pool.js';
+import { logger, resolveConfiguredLogLevel } from './src/api/observability/logger.js';
+import { redactSensitiveText } from './src/api/security/redaction.js';
 
 async function startServer(): Promise<void> {
   const app = createApp();
@@ -25,31 +27,48 @@ async function startServer(): Promise<void> {
     }
   }
 
+  const keepAliveTimeoutMs = Number(process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS) || 65_000;
+  const headersTimeoutMs =
+    Number(process.env.HTTP_HEADERS_TIMEOUT_MS) || Math.max(keepAliveTimeoutMs + 1_000, 66_000);
+  const requestTimeoutMs = Number(process.env.HTTP_REQUEST_TIMEOUT_MS) || 30_000;
+
   const server = app.listen(PORT, HOST, () => {
-    console.log(`===============================================`);
-    console.log(` Billing System REST API running in Phase 11`);
-    console.log(` Domain: Production Deployment & Cloud Hosting`);
-    console.log(` Security: JWT + RBAC/IDOR + Rate-Limit + Headers`);
-    console.log(` Server listening at http://${HOST}:${PORT}`);
-    console.log(` Health check: http://${HOST}:${PORT}/api/v1/health`);
-    console.log(` Register:     http://${HOST}:${PORT}/api/v1/auth/register`);
-    console.log(` Login:        http://${HOST}:${PORT}/api/v1/auth/login`);
-    console.log(` Current User: http://${HOST}:${PORT}/api/v1/auth/me`);
-    console.log(` Customers:    http://${HOST}:${PORT}/api/v1/customers`);
-    console.log(` Invoices:     http://${HOST}:${PORT}/api/v1/invoices`);
-    console.log(`===============================================`);
+    logger.info(
+      'server_started',
+      `Billing System REST API listening at http://${HOST}:${PORT}`,
+      {
+        phase: 14,
+        domain: 'Developer Readiness & Public API Release',
+        host: HOST,
+        port: PORT,
+        environment: process.env.NODE_ENV || 'development',
+        logLevel: resolveConfiguredLogLevel(),
+        keepAliveTimeoutMs,
+        requestTimeoutMs,
+        healthEndpoint: `/api/v1/health`,
+        metricsEndpoint: `/api/v1/metrics`,
+      }
+    );
   });
+
+  server.keepAliveTimeout = keepAliveTimeoutMs;
+  server.headersTimeout = headersTimeoutMs;
+  server.requestTimeout = requestTimeoutMs;
 
   // Graceful shutdown handling
   let isShuttingDown = false;
   const shutdown = async (signal: string) => {
     if (isShuttingDown) return;
     isShuttingDown = true;
-    console.log(`[PROCESS] Received ${signal}. Shutting down server gracefully...`);
+    logger.info(
+      'server_shutdown_initiated',
+      `[PROCESS] Received ${signal}. Shutting down server gracefully...`,
+      { signal }
+    );
 
     // Enforce shutdown timeout if connections or pool drains are kept alive
     const timeoutHandle = setTimeout(() => {
-      console.error('[PROCESS] Shutdown timed out after 5s. Forcing exit.');
+      logger.error('server_shutdown_timeout', '[PROCESS] Shutdown timed out after 5s. Forcing exit.');
       process.exit(1);
     }, 5000);
     timeoutHandle.unref();
@@ -60,16 +79,25 @@ async function startServer(): Promise<void> {
     }
     server.close(async (err) => {
       if (err) {
-        console.error('[PROCESS] Error closing HTTP server:', err);
+        logger.error(
+          'server_http_close_error',
+          `[PROCESS] Error closing HTTP server: ${redactSensitiveText(err.message)}`,
+          { error: redactSensitiveText(err.message) }
+        );
       } else {
-        console.log('[PROCESS] HTTP server closed cleanly.');
+        logger.info('server_http_closed', '[PROCESS] HTTP server closed cleanly.');
       }
 
       // 2. Close PostgreSQL connection pool
       try {
         await closePool();
       } catch (poolErr) {
-        console.error('[PROCESS] Error closing database pool:', poolErr);
+        const msg = poolErr instanceof Error ? poolErr.message : String(poolErr);
+        logger.error(
+          'db_pool_close_error',
+          `[PROCESS] Error closing database pool: ${redactSensitiveText(msg)}`,
+          { error: redactSensitiveText(msg) }
+        );
       }
 
       process.exit(err ? 1 : 0);
@@ -80,16 +108,25 @@ async function startServer(): Promise<void> {
   process.on('SIGINT', () => void shutdown('SIGINT'));
 
   process.on('unhandledRejection', (reason) => {
-    console.error('[PROCESS] Unhandled Promise Rejection:', reason);
+    const msg = reason instanceof Error ? reason.message : String(reason);
+    logger.error('process_unhandled_rejection', `[PROCESS] Unhandled Promise Rejection: ${redactSensitiveText(msg)}`, {
+      error: redactSensitiveText(msg),
+    });
   });
 
   process.on('uncaughtException', (err) => {
-    console.error('[PROCESS] Uncaught Exception:', err);
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error('process_uncaught_exception', `[PROCESS] Uncaught Exception: ${redactSensitiveText(msg)}`, {
+      error: redactSensitiveText(msg),
+    });
     process.exit(1);
   });
 }
 
 startServer().catch((err) => {
-  console.error('Failed to start server:', err);
+  const msg = err instanceof Error ? err.message : String(err);
+  logger.error('server_startup_failed', `Failed to start server: ${redactSensitiveText(msg)}`, {
+    error: redactSensitiveText(msg),
+  });
   process.exit(1);
 });

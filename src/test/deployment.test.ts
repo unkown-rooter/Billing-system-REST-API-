@@ -260,7 +260,7 @@ describe('Billing System REST API - Phase 11 Production Deployment & Live Hostin
   });
 
   describe('2. Authoritative Production Database Migrations & Idempotency', () => {
-    it('applies all 5 SQL migrations cleanly to billing_system_prod and is idempotent on repeat execution', async () => {
+    it('applies all 6 SQL migrations cleanly to billing_system_prod and is idempotent on repeat execution', async () => {
       // Execute compiled production migration runner inside Stage 2 rootfs as non-root `node` user
       const output = execSync(
         `su -s /bin/sh node -c "cd ${prodRootfs} && DATABASE_URL='${PROD_DATABASE_URL}' node dist-server/src/api/db/migrate.js"`,
@@ -268,7 +268,7 @@ describe('Billing System REST API - Phase 11 Production Deployment & Live Hostin
       );
       assert.match(output, /Migration process exited cleanly/);
 
-      // Verify schema_migrations records all 5 migrations in billing_system_prod
+      // Verify schema_migrations records all 6 migrations in billing_system_prod
       const { rows } = await prodPool.query<{ name: string }>(
         'SELECT name FROM schema_migrations ORDER BY id ASC'
       );
@@ -280,13 +280,14 @@ describe('Billing System REST API - Phase 11 Production Deployment & Live Hostin
           '003_add_authorization_role_and_ownership.sql',
           '004_create_invoices_and_items_tables.sql',
           '005_add_pagination_and_filtering_indexes.sql',
+          '006_add_composite_scaling_indexes.sql',
         ]
       );
 
       // Re-run migrations programmatically to verify strict idempotency (0 newly applied)
       const secondRun = await runMigrations(PROD_DATABASE_URL);
       assert.equal(secondRun.applied.length, 0);
-      assert.equal(secondRun.alreadyApplied.length, 5);
+      assert.equal(secondRun.alreadyApplied.length, 6);
     });
   });
 

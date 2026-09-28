@@ -19,7 +19,30 @@ const POSTGRES_URI_REGEX = /\b(postgres(?:ql)?:\/\/[^:\s/]+:)([^@\s]+)(@)/gi;
 const SCRYPT_HASH_REGEX = /\bscrypt\$[^\s"']+/gi;
 
 const KEY_VALUE_SECRET_REGEX =
-  /\b(password|password_hash|passwordHash|jwt_secret|JWT_SECRET|secret|token)(\s*[:=]\s*["']?)([^"'\s,};]+)(["']?)/gi;
+  /\b(password|password_hash|passwordHash|jwt_secret|JWT_SECRET|secret|token|authorization)(\s*[:=]\s*["']?)([^"'\s,};]+)(["']?)/gi;
+
+const RAW_JWT_REGEX = /\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g;
+
+const SENSITIVE_OBJECT_KEYS = new Set([
+  'password',
+  'passwordhash',
+  'password_hash',
+  'token',
+  'accesstoken',
+  'access_token',
+  'refreshtoken',
+  'refresh_token',
+  'authorization',
+  'secret',
+  'jwtsecret',
+  'jwt_secret',
+  'databaseurl',
+  'database_url',
+  'connectionstring',
+  'api_key',
+  'apikey',
+  'credential',
+]);
 
 /**
  * Strips CR/LF and control characters to prevent log-forging / CRLF injection.
@@ -59,7 +82,38 @@ export function redactSensitiveText(input: string): string {
   return stripControlChars(input)
     .replace(POSTGRES_URI_REGEX, '$1[REDACTED]$3')
     .replace(BEARER_TOKEN_REGEX, '$1[REDACTED]')
+    .replace(RAW_JWT_REGEX, '[REDACTED_JWT]')
     .replace(SCRYPT_HASH_REGEX, 'scrypt$[REDACTED]')
     .replace(SENSITIVE_QUERY_PARAM_REGEX, '$1[REDACTED]')
     .replace(KEY_VALUE_SECRET_REGEX, '$1$2[REDACTED]$4');
+}
+
+/**
+ * Recursively sanitizes structured log metadata objects so sensitive keys or embedded
+ * credentials/tokens are redacted before JSON serialization.
+ */
+export function redactSensitiveObject<T>(value: T, depth = 0): T {
+  if (depth > 5 || value === null || value === undefined) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    return redactSensitiveText(value) as unknown as T;
+  }
+  if (typeof value !== 'object') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => redactSensitiveObject(item, depth + 1)) as unknown as T;
+  }
+
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    const normalizedKey = key.toLowerCase().replace(/[^a-z0-9_]/g, '');
+    if (SENSITIVE_OBJECT_KEYS.has(normalizedKey)) {
+      sanitized[key] = '[REDACTED]';
+    } else {
+      sanitized[key] = redactSensitiveObject(val, depth + 1);
+    }
+  }
+  return sanitized as unknown as T;
 }

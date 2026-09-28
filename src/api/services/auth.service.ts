@@ -15,6 +15,8 @@ import {
   InvalidCredentialsError,
   NotFoundError,
 } from './errors.js';
+import { logger } from '../observability/logger.js';
+import { metricsCollector } from '../observability/metrics.js';
 
 /**
  * Authentication & Identity Service
@@ -83,6 +85,10 @@ export class AuthService {
     };
 
     const saved = await this.accountRepo.create(newAccount);
+    logger.info('auth_register_success', 'Account registered successfully', {
+      accountId: saved.id,
+      role: saved.role,
+    });
     return this.toDTO(saved);
   }
 
@@ -97,17 +103,32 @@ export class AuthService {
     if (!account) {
       // Neutralize timing attacks by executing a real scrypt derivation
       await this.passwordService.dummyVerify(dto.password);
+      metricsCollector.recordSecurityEvent('authLoginFailure');
+      logger.warn('auth_login_failed', 'Authentication failed: invalid credentials', {
+        reason: 'account_not_found',
+      });
       throw new InvalidCredentialsError('Invalid email or password');
     }
 
     const isValid = await this.passwordService.verifyPassword(dto.password, account.passwordHash);
     if (!isValid) {
+      metricsCollector.recordSecurityEvent('authLoginFailure');
+      logger.warn('auth_login_failed', 'Authentication failed: invalid credentials', {
+        accountId: account.id,
+        reason: 'invalid_password',
+      });
       throw new InvalidCredentialsError('Invalid email or password');
     }
 
     const token = this.tokenService.generateToken({
       id: account.id,
       email: account.email,
+      role: account.role,
+    });
+
+    metricsCollector.recordSecurityEvent('authLoginSuccess');
+    logger.info('auth_login_success', 'Account authenticated successfully', {
+      accountId: account.id,
       role: account.role,
     });
 

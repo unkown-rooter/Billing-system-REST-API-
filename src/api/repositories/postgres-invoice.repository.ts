@@ -16,6 +16,7 @@ import {
   DatabaseError,
 } from '../services/errors.js';
 import { redactSensitiveText } from '../security/redaction.js';
+import { logger } from '../observability/logger.js';
 
 const INVOICE_SORT_COLUMN_MAP: Record<InvoiceSortField, string> = {
   createdAt: 'i.created_at',
@@ -140,7 +141,12 @@ export class PostgresInvoiceRepository implements IInvoiceRepository {
       }
     }
     const rawMsg = err instanceof Error ? err.message : String(err);
-    console.error('[POSTGRES INVOICE REPOSITORY] Operational query failure:', redactSensitiveText(rawMsg));
+    const safeMsg = redactSensitiveText(rawMsg);
+    logger.error('db_query_error', `[POSTGRES INVOICE REPOSITORY] Operational query failure: ${safeMsg}`, {
+      repository: 'PostgresInvoiceRepository',
+      operationMessage: defaultMessage,
+      error: safeMsg,
+    });
     throw new DatabaseError(defaultMessage);
   }
 
@@ -421,6 +427,51 @@ export class PostgresInvoiceRepository implements IInvoiceRepository {
   }
 
   /**
+   * Inserts all line items for an invoice in a single parameterized multi-row INSERT
+   * round-trip inside the active transaction to minimize connection hold duration.
+   */
+  private async insertItemsBatch(
+    client: pg.PoolClient,
+    invoiceId: string,
+    items: InvoiceItem[]
+  ): Promise<InvoiceItem[]> {
+    if (items.length === 0) {
+      return [];
+    }
+
+    const valueTuples: string[] = [];
+    const params: (string | number)[] = [];
+    let paramIdx = 1;
+
+    for (const item of items) {
+      valueTuples.push(
+        `($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`
+      );
+      params.push(
+        item.id,
+        invoiceId,
+        item.description,
+        item.quantity,
+        item.unitPrice.toFixed(2),
+        item.lineTotal.toFixed(2),
+        item.createdAt,
+        item.updatedAt
+      );
+    }
+
+    const itemResult = await client.query<InvoiceItemRow>(
+      `INSERT INTO invoice_items (
+         id, invoice_id, description, quantity, unit_price, line_total, created_at, updated_at
+       )
+       VALUES ${valueTuples.join(', ')}
+       RETURNING id, invoice_id, description, quantity, unit_price, line_total, created_at, updated_at;`,
+      params
+    );
+
+    return itemResult.rows.map((r) => this.mapItemRow(r));
+  }
+
+  /**
    * Persists an Invoice and all of its InvoiceItems atomically inside a single database transaction.
    * If any item fails validation or constraint checks, the entire transaction is rolled back.
    */
@@ -457,27 +508,7 @@ export class PostgresInvoiceRepository implements IInvoiceRepository {
         ]
       );
 
-      const insertedItems: InvoiceItem[] = [];
-      for (const item of invoice.items) {
-        const itemResult = await client.query<InvoiceItemRow>(
-          `INSERT INTO invoice_items (
-             id, invoice_id, description, quantity, unit_price, line_total, created_at, updated_at
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-           RETURNING id, invoice_id, description, quantity, unit_price, line_total, created_at, updated_at;`,
-          [
-            item.id,
-            invoice.id,
-            item.description,
-            item.quantity,
-            item.unitPrice.toFixed(2),
-            item.lineTotal.toFixed(2),
-            item.createdAt,
-            item.updatedAt,
-          ]
-        );
-        insertedItems.push(this.mapItemRow(itemResult.rows[0]));
-      }
+      const insertedItems = await this.insertItemsBatch(client, invoice.id, invoice.items);
 
       await client.query('COMMIT');
       return this.mapInvoiceRow(invResult.rows[0], insertedItems);
@@ -549,27 +580,7 @@ export class PostgresInvoiceRepository implements IInvoiceRepository {
       let finalItems: InvoiceItem[];
       if (updates.items !== undefined) {
         await client.query('DELETE FROM invoice_items WHERE invoice_id = $1;', [id]);
-        finalItems = [];
-        for (const item of updates.items) {
-          const itemResult = await client.query<InvoiceItemRow>(
-            `INSERT INTO invoice_items (
-               id, invoice_id, description, quantity, unit_price, line_total, created_at, updated_at
-             )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-             RETURNING id, invoice_id, description, quantity, unit_price, line_total, created_at, updated_at;`,
-            [
-              item.id,
-              id,
-              item.description,
-              item.quantity,
-              item.unitPrice.toFixed(2),
-              item.lineTotal.toFixed(2),
-              item.createdAt,
-              item.updatedAt,
-            ]
-          );
-          finalItems.push(this.mapItemRow(itemResult.rows[0]));
-        }
+        finalItems = await this.insertItemsBatch(client, id, updates.items);
       } else {
         const itemsRes = await client.query<InvoiceItemRow>(
           `SELECT id, invoice_id, description, quantity, unit_price, line_total, created_at, updated_at

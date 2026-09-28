@@ -69,6 +69,7 @@ describe('Billing System REST API - Phase 8 HTTP Contracts & Security Regression
         error: {
           code: 'PAYLOAD_TOO_LARGE',
           message: 'Request payload exceeds the permitted limit (100kb)',
+          requestId: res.headers.get('x-request-id'),
         },
       });
     });

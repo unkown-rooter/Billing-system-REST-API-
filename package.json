@@ -1,7 +1,8 @@
 {
-  "name": "react-example",
+  "name": "billing-system-api",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
@@ -17,7 +18,7 @@
     "migrate": "tsx src/api/db/migrate.ts",
     "migrate:prod": "node dist-server/src/api/db/migrate.js",
     "deploy:release": "bash scripts/deploy-release.sh",
-    "test": "tsx src/test/unit/domain-and-services.unit.test.ts && tsx src/test/integration/service-repository.integration.test.ts && tsx src/test/http/http-contracts-and-security.test.ts && tsx src/test/api.test.ts && tsx src/test/validation.test.ts && tsx src/test/auth.test.ts && tsx src/test/authorization.test.ts && tsx src/test/relationships.test.ts && tsx src/test/pagination.test.ts && tsx src/test/security.test.ts",
+    "test": "tsx src/test/unit/domain-and-services.unit.test.ts && tsx src/test/integration/service-repository.integration.test.ts && tsx src/test/http/http-contracts-and-security.test.ts && tsx src/test/api.test.ts && tsx src/test/validation.test.ts && tsx src/test/auth.test.ts && tsx src/test/authorization.test.ts && tsx src/test/relationships.test.ts && tsx src/test/pagination.test.ts && tsx src/test/security.test.ts && tsx src/test/observability.test.ts",
     "test:unit": "tsx src/test/unit/domain-and-services.unit.test.ts",
     "test:service-integration": "tsx src/test/integration/service-repository.integration.test.ts",
     "test:http": "tsx src/test/http/http-contracts-and-security.test.ts",
@@ -27,11 +28,14 @@
     "test:relationships": "tsx src/test/relationships.test.ts",
     "test:pagination": "tsx src/test/pagination.test.ts",
     "test:security": "tsx src/test/security.test.ts",
+    "test:observability": "tsx src/test/observability.test.ts",
+    "test:scaling": "tsx src/test/scaling.test.ts",
     "test:docker": "tsx src/test/docker-runtime.test.ts",
     "test:deploy": "tsx src/test/deployment.test.ts",
+    "test:docs": "tsx src/test/developer-readiness.test.ts",
     "test:validation": "tsx src/test/validation.test.ts",
     "test:integration": "tsx src/test/postgres.test.ts",
-    "test:all": "npm test && npm run test:integration && npm run test:docker && npm run test:deploy"
+    "test:all": "npm test && npm run test:integration && npm run test:scaling && npm run test:docker && npm run test:deploy && npm run test:docs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

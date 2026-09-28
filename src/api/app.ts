@@ -36,6 +36,8 @@ import { AuthController } from './controllers/auth.controller.js';
 import { createAuthMiddleware } from './middlewares/auth.middleware.js';
 import { createV1Router } from './routes/index.js';
 import { SecurityConfigurationError } from './services/errors.js';
+import { logger } from './observability/logger.js';
+import { redactSensitiveUrl, stripControlChars } from './security/redaction.js';
 
 export interface AppDependencies {
   customerRepository?: ICustomerRepository;
@@ -68,9 +70,9 @@ export function createApp(deps: AppDependencies = {}): Express {
   app.use(createSecurityHeadersMiddleware(deps.securityHeadersOptions));
   app.use(createCorsMiddleware(deps.corsOptions));
 
-  // 2. Global Middleware (Bounded JSON Parser & Redacted Request Logger)
-  app.use(express.json({ limit: '100kb', strict: false }));
+  // 2. Global Middleware (Request Correlation Logger & Bounded JSON Parser)
   app.use(requestLogger);
+  app.use(express.json({ limit: '100kb', strict: false }));
 
   // 3. Dependency Wiring (Inversion of Control)
   const isPostgres = Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim().length > 0);
@@ -137,11 +139,21 @@ export function createApp(deps: AppDependencies = {}): Express {
 
   // 5. API 404 Handler for undefined API routes
   app.all(['/api', '/api/*'], (req: Request, res: Response) => {
+    const safeMethod = stripControlChars(req.method || 'GET');
+    const safePath = redactSensitiveUrl(req.originalUrl || req.url || '/api');
+    logger.warn('route_not_found', `Endpoint ${safeMethod} ${safePath} not found`, {
+      requestId: req.requestId,
+      errorCode: 'ROUTE_NOT_FOUND',
+      statusCode: 404,
+      method: safeMethod,
+      path: safePath,
+    });
     res.status(404).json({
       status: 'error',
       error: {
         code: 'ROUTE_NOT_FOUND',
         message: `Endpoint ${req.method} ${req.originalUrl} not found`,
+        ...(req.requestId ? { requestId: req.requestId } : {}),
       },
     });
   });

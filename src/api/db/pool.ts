@@ -1,6 +1,7 @@
 import pg from 'pg';
 import 'dotenv/config';
 import { redactSensitiveText } from '../security/redaction.js';
+import { logger } from '../observability/logger.js';
 
 const { Pool } = pg;
 
@@ -9,6 +10,38 @@ export interface PoolConfig {
   max?: number;
   idleTimeoutMillis?: number;
   connectionTimeoutMillis?: number;
+  statementTimeoutMillis?: number;
+}
+
+export interface DatabasePoolStats {
+  max: number;
+  totalCount: number;
+  idleCount: number;
+  waitingCount: number;
+  activeCount: number;
+}
+
+function parsePositiveIntEnv(envVal: string | undefined, fallback: number): number {
+  if (!envVal) return fallback;
+  const parsed = Number.parseInt(envVal, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function resolvePoolConfig(customConfig?: PoolConfig): Required<Omit<PoolConfig, 'connectionString'>> & {
+  connectionString?: string;
+} {
+  return {
+    connectionString: customConfig?.connectionString || process.env.DATABASE_URL,
+    max: customConfig?.max ?? parsePositiveIntEnv(process.env.DB_POOL_MAX, 10),
+    idleTimeoutMillis:
+      customConfig?.idleTimeoutMillis ?? parsePositiveIntEnv(process.env.DB_POOL_IDLE_TIMEOUT_MS, 30_000),
+    connectionTimeoutMillis:
+      customConfig?.connectionTimeoutMillis ??
+      parsePositiveIntEnv(process.env.DB_POOL_CONNECTION_TIMEOUT_MS, 5_000),
+    statementTimeoutMillis:
+      customConfig?.statementTimeoutMillis ??
+      parsePositiveIntEnv(process.env.DB_STATEMENT_TIMEOUT_MS, 10_000),
+  };
 }
 
 export interface ProductionDatabaseValidationOptions {
@@ -75,32 +108,77 @@ export function assertSafeProductionDatabaseUrl(
 }
 
 let activePool: pg.Pool | null = null;
+let activePoolMax = 10;
 
 /**
  * Returns or initializes the shared PostgreSQL connection pool.
- * Configured via the DATABASE_URL environment variable.
+ * Configured via DATABASE_URL, DB_POOL_MAX, DB_POOL_IDLE_TIMEOUT_MS,
+ * DB_POOL_CONNECTION_TIMEOUT_MS, and DB_STATEMENT_TIMEOUT_MS.
  */
 export function getPool(customConfig?: PoolConfig): pg.Pool {
   if (!activePool) {
-    const connectionString = customConfig?.connectionString || process.env.DATABASE_URL;
+    const resolved = resolvePoolConfig(customConfig);
 
-    if (!connectionString) {
-      console.warn('[DATABASE] DATABASE_URL is not set. Database operations will fail until configured.');
+    if (!resolved.connectionString) {
+      logger.warn('db_config_missing', '[DATABASE] DATABASE_URL is not set. Database operations will fail until configured.');
     }
 
+    activePoolMax = resolved.max;
     activePool = new Pool({
-      connectionString,
-      max: customConfig?.max ?? 10,
-      idleTimeoutMillis: customConfig?.idleTimeoutMillis ?? 30000,
-      connectionTimeoutMillis: customConfig?.connectionTimeoutMillis ?? 5000,
+      connectionString: resolved.connectionString,
+      max: resolved.max,
+      idleTimeoutMillis: resolved.idleTimeoutMillis,
+      connectionTimeoutMillis: resolved.connectionTimeoutMillis,
+      statement_timeout: resolved.statementTimeoutMillis,
     });
 
     activePool.on('error', (err: Error) => {
-      console.error('[DATABASE POOL] Unexpected error on idle client:', redactSensitiveText(err.message));
+      logger.error(
+        'db_pool_error',
+        `[DATABASE POOL] Unexpected error on idle client: ${redactSensitiveText(err.message)}`,
+        { error: redactSensitiveText(err.message) }
+      );
     });
   }
 
   return activePool;
+}
+
+/**
+ * Returns current connection pool telemetry without initializing a new pool
+ * if one has not been started.
+ */
+export function getPoolStats(poolInstance?: pg.Pool): DatabasePoolStats {
+  const pool = poolInstance ?? activePool;
+  const max = poolInstance
+    ? ((poolInstance as unknown as { options?: { max?: number } }).options?.max ??
+      resolvePoolConfig().max)
+    : activePool
+      ? activePoolMax
+      : resolvePoolConfig().max;
+
+  if (!pool) {
+    return {
+      max,
+      totalCount: 0,
+      idleCount: 0,
+      waitingCount: 0,
+      activeCount: 0,
+    };
+  }
+
+  const totalCount = pool.totalCount ?? 0;
+  const idleCount = pool.idleCount ?? 0;
+  const waitingCount = pool.waitingCount ?? 0;
+  const activeCount = Math.max(0, totalCount - idleCount);
+
+  return {
+    max,
+    totalCount,
+    idleCount,
+    waitingCount,
+    activeCount,
+  };
 }
 
 /**
@@ -119,7 +197,10 @@ export async function testConnection(poolInstance?: pg.Pool): Promise<boolean> {
     }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
-    console.error('[DATABASE] Connectivity check failed:', redactSensitiveText(errorMessage));
+    const safeMsg = redactSensitiveText(errorMessage);
+    logger.error('db_health_check_failed', `[DATABASE] Connectivity check failed: ${safeMsg}`, {
+      error: safeMsg,
+    });
     return false;
   }
 }
@@ -129,9 +210,9 @@ export async function testConnection(poolInstance?: pg.Pool): Promise<boolean> {
  */
 export async function closePool(): Promise<void> {
   if (activePool) {
-    console.log('[DATABASE POOL] Draining and closing database pool...');
+    logger.info('db_pool_draining', '[DATABASE POOL] Draining and closing database pool...');
     await activePool.end();
     activePool = null;
-    console.log('[DATABASE POOL] Pool closed.');
+    logger.info('db_pool_closed', '[DATABASE POOL] Pool closed.');
   }
 }

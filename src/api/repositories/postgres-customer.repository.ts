@@ -9,6 +9,7 @@ import {
 import { ICustomerRepository } from './customer.repository.interface.js';
 import { DuplicateResourceError, ConflictError, DatabaseError } from '../services/errors.js';
 import { redactSensitiveText } from '../security/redaction.js';
+import { logger } from '../observability/logger.js';
 
 const CUSTOMER_SORT_COLUMN_MAP: Record<CustomerSortField, string> = {
   createdAt: 'created_at',
@@ -59,7 +60,12 @@ export class PostgresCustomerRepository implements ICustomerRepository {
       }
     }
     const rawMsg = err instanceof Error ? err.message : String(err);
-    console.error('[POSTGRES REPOSITORY] Operational query failure:', redactSensitiveText(rawMsg));
+    const safeMsg = redactSensitiveText(rawMsg);
+    logger.error('db_query_error', `[POSTGRES REPOSITORY] Operational query failure: ${safeMsg}`, {
+      repository: 'PostgresCustomerRepository',
+      operationMessage: defaultMessage,
+      error: safeMsg,
+    });
     throw new DatabaseError(defaultMessage);
   }
 

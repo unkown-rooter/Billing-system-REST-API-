@@ -306,6 +306,7 @@ describe('Billing System REST API - Phase 5 Authorization & Access Control Test 
         error: {
           code: 'FORBIDDEN',
           message: 'You are not authorized to perform this action',
+          requestId: res.headers.get('x-request-id'),
         },
       });
 
@@ -327,6 +328,7 @@ describe('Billing System REST API - Phase 5 Authorization & Access Control Test 
         error: {
           code: 'FORBIDDEN',
           message: 'You are not authorized to perform this action',
+          requestId: res.headers.get('x-request-id'),
         },
       });
 
@@ -462,6 +464,7 @@ describe('Billing System REST API - Phase 5 Authorization & Access Control Test 
         error: {
           code: 'FORBIDDEN',
           message: 'You are not authorized to perform this action',
+          requestId: res.headers.get('x-request-id'),
         },
       });
 

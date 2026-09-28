@@ -1,0 +1,1964 @@
+openapi: 3.1.0
+info:
+  title: Billing System REST API
+  version: 1.0.0
+  summary: Multi-tenant financial ledger, customer management, and transactional invoicing REST API.
+  description: |
+    Production-grade RESTful API for managing operator accounts, customer ledgers, and multi-item invoices backed by PostgreSQL 15+.
+
+    ### Key Architectural Guarantees
+    - **Stateless Bearer Authentication (`HS256` JWT):** Issued via `POST /api/v1/auth/login` using `crypto.scrypt` memory-hard password verification and constant-time HMAC signature checks.
+    - **Role-Based Access Control (`user` | `admin`) & Zero-Trust Ownership (IDOR Prevention):** `user` accounts can only access or mutate Customers, Invoices, and Invoice Items bound to their own `accountId`. Cross-account access returns `403 FORBIDDEN`. Destructive deletions (`DELETE /api/v1/customers/{id}` and `DELETE /api/v1/invoices/{id}`) require the `admin` role.
+    - **Authoritative Integer-Cents Financial Math:** Clients supply item `quantity` and `unitPrice` alongside optional `tax` and `discount`. All `lineTotal`, `subtotal`, and `total` fields are computed exclusively server-side in integer cents (`total = subtotal + tax - discount`). Supplying server-computed fields in request payloads is rejected with `400 VALIDATION_ERROR`.
+    - **Standardized Envelopes & Request Correlation:** All responses include an `X-Request-Id` header and use uniform `{ "status": "success", "data": ... }` or `{ "status": "error", "error": { "code", "message", "fields"?, "requestId"? } }` envelopes.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:3000
+    description: Local Development & Docker Compose Server
+  - url: https://billing-api.example.com
+    description: Production HTTPS Endpoint (Replace with deployed Cloud Run / reverse-proxy URL)
+
+tags:
+  - name: Health & Observability
+    description: Liveness, readiness, PostgreSQL connectivity, and operational metrics endpoints.
+  - name: Authentication
+    description: Account registration, credential login, and authenticated identity inspection.
+  - name: Customers
+    description: Customer ledger creation, retrieval, ownership-scoped listing, updates, and admin deletion.
+  - name: Invoices
+    description: Transactional multi-item invoice issuance, lifecycle transitions, filtering, and line-item queries.
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        RFC 6750 Bearer token signed with `HS256`. Obtain a token via `POST /api/v1/auth/login` and pass it in the `Authorization: Bearer <token>` header.
+        JWT payload claims: `sub` (`acc_<uuid>`), `email`, `role` (`user` | `admin`), `iat`, `exp`.
+
+  headers:
+    X-Request-Id:
+      description: Unique request correlation identifier echoed from client or generated server-side.
+      schema:
+        type: string
+        example: req_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+    X-RateLimit-Limit:
+      description: Maximum requests permitted within the active rate-limit window.
+      schema:
+        type: integer
+        example: 300
+    X-RateLimit-Remaining:
+      description: Remaining requests permitted in the current rate-limit window.
+      schema:
+        type: integer
+        example: 299
+    X-RateLimit-Reset:
+      description: Unix epoch timestamp (in seconds) when the active rate-limit window resets.
+      schema:
+        type: integer
+        example: 1758998460
+    Retry-After:
+      description: Seconds until the client may retry after receiving `429 Too Many Requests`.
+      schema:
+        type: integer
+        example: 60
+    Allow:
+      description: Comma-separated list of permitted HTTP methods returned on `405 Method Not Allowed`.
+      schema:
+        type: string
+        example: GET, POST
+    Location:
+      description: Canonical URI of the newly created resource returned on `201 Created`.
+      schema:
+        type: string
+        example: /api/v1/customers/cus_4a41c717-3143-4c12-9bf3-de0f4642d7c3
+
+  parameters:
+    PageParam:
+      name: page
+      in: query
+      required: false
+      description: 1-indexed page number (`1..1,000,000`). Defaults to `1`.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000000
+        default: 1
+    LimitParam:
+      name: limit
+      in: query
+      required: false
+      description: Maximum records returned per page (`1..100`). Defaults to `20`.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    OrderParam:
+      name: order
+      in: query
+      required: false
+      description: Sort direction (`asc` or `desc`, case-insensitive). Defaults to `asc`. Deterministic tie-breaking on `id` is always applied.
+      schema:
+        type: string
+        enum: [asc, desc]
+        default: asc
+    CustomerIdPathParam:
+      name: id
+      in: path
+      required: true
+      description: Unique customer identifier (`cus_<uuidv4>`).
+      schema:
+        type: string
+        pattern: '^cus_[a-zA-Z0-9_-]+$'
+        example: cus_4a41c717-3143-4c12-9bf3-de0f4642d7c3
+    InvoiceIdPathParam:
+      name: id
+      in: path
+      required: true
+      description: Unique invoice identifier (`inv_<uuidv4>`).
+      schema:
+        type: string
+        pattern: '^inv_[a-zA-Z0-9_-]+$'
+        example: inv_9f82b310-7c12-49a1-8b20-61f3d9a8c112
+
+  schemas:
+    AccountDTO:
+      type: object
+      additionalProperties: false
+      required: [id, email, role, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          pattern: '^acc_[a-zA-Z0-9_-]+$'
+          example: acc_cb5d153e-a061-45ac-b338-acaa916bd5e5
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          example: billing.ops@acme-corp.example.com
+        role:
+          type: string
+          enum: [user, admin]
+          example: user
+        createdAt:
+          type: string
+          format: date-time
+          example: '2026-09-27T06:36:14.102Z'
+        updatedAt:
+          type: string
+          format: date-time
+          example: '2026-09-27T06:36:14.102Z'
+
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          description: Operator email address (normalized to lowercase; must be unique).
+          example: billing.ops@acme-corp.example.com
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+          description: Plaintext password (8–128 characters, cannot be all whitespace; hashed server-side via `crypto.scrypt`).
+          example: example-Passw0rd-987!
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          example: billing.ops@acme-corp.example.com
+        password:
+          type: string
+          minLength: 1
+          maxLength: 128
+          example: example-Passw0rd-987!
+
+    AuthTokenData:
+      type: object
+      additionalProperties: false
+      required: [token, tokenType, expiresIn, account]
+      properties:
+        token:
+          type: string
+          description: Signed RFC 7519 HS256 JWT Bearer token.
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhY2NfY2I1ZDE1M2UtYTA2MS00NWFjLWIzMzgtYWNhYTkxNmJkNWU1IiwiZW1haWwiOiJiaWxsaW5nLm9wc0BhY21lLWNvcnAuZXhhbXBsZS5jb20iLCJyb2xlIjoidXNlciIsImlhdCI6MTc1ODk1NDk3NCwiZXhwIjoxNzU5MDQxMzc0fQ.example_signature_do_not_use
+        tokenType:
+          type: string
+          enum: [Bearer]
+          example: Bearer
+        expiresIn:
+          type: integer
+          description: Token lifetime in seconds (defaults to 86400 / 24 hours).
+          example: 86400
+        account:
+          $ref: '#/components/schemas/AccountDTO'
+
+    Customer:
+      type: object
+      additionalProperties: false
+      required: [id, accountId, name, email, currency, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          pattern: '^cus_[a-zA-Z0-9_-]+$'
+          example: cus_4a41c717-3143-4c12-9bf3-de0f4642d7c3
+        accountId:
+          type: string
+          pattern: '^acc_[a-zA-Z0-9_-]+$'
+          description: ID of the Account that owns this customer record.
+          example: acc_cb5d153e-a061-45ac-b338-acaa916bd5e5
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          example: Wayne Enterprises
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          example: ap@wayne-enterprises.example.com
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          description: 3-letter uppercase ISO 4217 currency code.
+          example: USD
+        createdAt:
+          type: string
+          format: date-time
+          example: '2026-09-27T06:36:15.410Z'
+        updatedAt:
+          type: string
+          format: date-time
+          example: '2026-09-27T06:36:15.410Z'
+
+    CreateCustomerRequest:
+      type: object
+      additionalProperties: false
+      required: [name, email, currency]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          example: Wayne Enterprises
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          example: ap@wayne-enterprises.example.com
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          description: 3-letter uppercase ISO 4217 currency code (e.g. `USD`, `EUR`, `KES`).
+          example: USD
+
+    UpdateCustomerRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: At least one mutable field (`name`, `email`, or `currency`) must be provided. Immutable fields (`id`, `accountId`, `createdAt`) are rejected with `400 VALIDATION_ERROR`.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          example: Wayne Enterprises Global
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          example: treasury@wayne-enterprises.example.com
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          example: USD
+
+    InvoiceStatus:
+      type: string
+      enum: [draft, issued, paid, overdue, cancelled]
+      example: issued
+
+    InvoiceItem:
+      type: object
+      additionalProperties: false
+      required: [id, invoiceId, description, quantity, unitPrice, lineTotal, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          pattern: '^item_[a-zA-Z0-9_-]+$'
+          example: item_0001_3d19a400-1b2c-4d5e-9f00-112233445566
+        invoiceId:
+          type: string
+          pattern: '^inv_[a-zA-Z0-9_-]+$'
+          example: inv_9f82b310-7c12-49a1-8b20-61f3d9a8c112
+        description:
+          type: string
+          minLength: 1
+          maxLength: 500
+          example: Dedicated Compute Cluster (Monthly)
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+          example: 2
+        unitPrice:
+          type: number
+          minimum: 0
+          maximum: 9999999999.99
+          description: Monetary unit price with at most 2 decimal places.
+          example: 150.0
+        lineTotal:
+          type: number
+          description: Authoritative server-computed product (`quantity * unitPrice`).
+          example: 300.0
+        createdAt:
+          type: string
+          format: date-time
+          example: '2026-09-27T06:36:18.904Z'
+        updatedAt:
+          type: string
+          format: date-time
+          example: '2026-09-27T06:36:18.904Z'
+
+    CreateInvoiceItemInput:
+      type: object
+      additionalProperties: false
+      required: [description, quantity, unitPrice]
+      description: Client input for an invoice line item. Server-computed fields (`id`, `invoiceId`, `lineTotal`, `amount`, `total`, `createdAt`, `updatedAt`) are forbidden.
+      properties:
+        description:
+          type: string
+          minLength: 1
+          maxLength: 500
+          example: Dedicated Compute Cluster (Monthly)
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+          example: 2
+        unitPrice:
+          type: number
+          minimum: 0
+          maximum: 9999999999.99
+          example: 150.0
+
+    Invoice:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - customerId
+        - invoiceNumber
+        - status
+        - currency
+        - subtotal
+        - tax
+        - discount
+        - total
+        - issueDate
+        - dueDate
+        - notes
+        - items
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          pattern: '^inv_[a-zA-Z0-9_-]+$'
+          example: inv_9f82b310-7c12-49a1-8b20-61f3d9a8c112
+        customerId:
+          type: string
+          pattern: '^cus_[a-zA-Z0-9_-]+$'
+          example: cus_4a41c717-3143-4c12-9bf3-de0f4642d7c3
+        invoiceNumber:
+          type: string
+          description: Unique human-readable invoice number (`INV-YYYY-XXXX-XXXX`).
+          example: INV-2026-0001-9F82
+        status:
+          $ref: '#/components/schemas/InvoiceStatus'
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          description: 3-letter ISO 4217 currency code matching the parent customer currency.
+          example: USD
+        subtotal:
+          type: number
+          description: Authoritative server-computed sum of all `items[].lineTotal`.
+          example: 385.0
+        tax:
+          type: number
+          minimum: 0
+          example: 25.0
+        discount:
+          type: number
+          minimum: 0
+          example: 10.0
+        total:
+          type: number
+          description: Authoritative server-computed total (`subtotal + tax - discount`).
+          example: 400.0
+        issueDate:
+          type: string
+          format: date-time
+          example: '2026-09-27T00:00:00.000Z'
+        dueDate:
+          type: string
+          format: date-time
+          example: '2026-10-27T00:00:00.000Z'
+        notes:
+          type: ['string', 'null']
+          maxLength: 1000
+          example: Q4 Dedicated Infrastructure Commitment
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/InvoiceItem'
+        createdAt:
+          type: string
+          format: date-time
+          example: '2026-09-27T06:36:18.904Z'
+        updatedAt:
+          type: string
+          format: date-time
+          example: '2026-09-27T06:36:18.904Z'
+
+    CreateInvoiceRequest:
+      type: object
+      additionalProperties: false
+      required: [customerId, items]
+      description: Request payload for `POST /api/v1/invoices`. Server-computed fields (`id`, `invoiceNumber`, `subtotal`, `total`, `createdAt`, `updatedAt`, `accountId`) are rejected.
+      properties:
+        customerId:
+          type: string
+          pattern: '^cus_[a-zA-Z0-9_-]+$'
+          example: cus_4a41c717-3143-4c12-9bf3-de0f4642d7c3
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          description: Optional 3-letter uppercase ISO currency code. Must match the parent customer's currency if supplied.
+          example: USD
+        status:
+          $ref: '#/components/schemas/InvoiceStatus'
+        tax:
+          type: number
+          minimum: 0
+          maximum: 9999999999.99
+          default: 0
+          example: 25.0
+        discount:
+          type: number
+          minimum: 0
+          maximum: 9999999999.99
+          default: 0
+          example: 10.0
+        issueDate:
+          type: string
+          format: date-time
+          example: '2026-09-27T00:00:00.000Z'
+        dueDate:
+          type: string
+          format: date-time
+          description: Must be on or after `issueDate`. Defaults to `issueDate + 30 days`.
+          example: '2026-10-27T00:00:00.000Z'
+        notes:
+          type: ['string', 'null']
+          maxLength: 1000
+          example: Q4 Dedicated Infrastructure Commitment
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/CreateInvoiceItemInput'
+
+    CreateCustomerInvoiceRequest:
+      type: object
+      additionalProperties: false
+      required: [items]
+      description: Request payload for `POST /api/v1/customers/{id}/invoices`. The target `customerId` is taken from the `{id}` path parameter.
+      properties:
+        customerId:
+          type: string
+          pattern: '^cus_[a-zA-Z0-9_-]+$'
+          description: Optional; overridden by the `{id}` path parameter.
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          example: USD
+        status:
+          $ref: '#/components/schemas/InvoiceStatus'
+        tax:
+          type: number
+          minimum: 0
+          maximum: 9999999999.99
+          default: 0
+          example: 25.0
+        discount:
+          type: number
+          minimum: 0
+          maximum: 9999999999.99
+          default: 0
+          example: 10.0
+        issueDate:
+          type: string
+          format: date-time
+          example: '2026-09-27T00:00:00.000Z'
+        dueDate:
+          type: string
+          format: date-time
+          example: '2026-10-27T00:00:00.000Z'
+        notes:
+          type: ['string', 'null']
+          maxLength: 1000
+          example: Q4 Dedicated Infrastructure Commitment
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/CreateInvoiceItemInput'
+
+    UpdateInvoiceRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: |
+        At least one mutable field (`status`, `tax`, `discount`, `dueDate`, `notes`, `items`) must be provided.
+        Immutable/computed fields (`id`, `customerId`, `invoiceNumber`, `currency`, `subtotal`, `total`, `issueDate`, `createdAt`, `updatedAt`, `accountId`) are rejected with `400 VALIDATION_ERROR`.
+        Modifying financial fields (`items`, `tax`, `discount`) on a `paid` or `cancelled` invoice returns `409 CONFLICT`.
+      properties:
+        status:
+          $ref: '#/components/schemas/InvoiceStatus'
+        tax:
+          type: number
+          minimum: 0
+          maximum: 9999999999.99
+          example: 30.0
+        discount:
+          type: number
+          minimum: 0
+          maximum: 9999999999.99
+          example: 5.0
+        dueDate:
+          type: string
+          format: date-time
+          example: '2026-11-15T00:00:00.000Z'
+        notes:
+          type: ['string', 'null']
+          maxLength: 1000
+          example: Updated payment terms
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/CreateInvoiceItemInput'
+
+    PaginationMeta:
+      type: object
+      additionalProperties: false
+      required: [page, limit, total, totalPages, hasNextPage, hasPreviousPage]
+      properties:
+        page:
+          type: integer
+          minimum: 1
+          example: 1
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          example: 20
+        total:
+          type: integer
+          minimum: 0
+          description: Total matching records across all pages.
+          example: 1
+        totalPages:
+          type: integer
+          minimum: 0
+          description: Total number of pages (`0` when `total === 0`, otherwise `ceil(total / limit)`).
+          example: 1
+        hasNextPage:
+          type: boolean
+          example: false
+        hasPreviousPage:
+          type: boolean
+          example: false
+
+    DatabasePoolStats:
+      type: object
+      additionalProperties: false
+      required: [max, totalCount, idleCount, waitingCount, activeCount]
+      properties:
+        max:
+          type: integer
+          example: 10
+        totalCount:
+          type: integer
+          example: 2
+        idleCount:
+          type: integer
+          example: 2
+        waitingCount:
+          type: integer
+          example: 0
+        activeCount:
+          type: integer
+          example: 0
+
+    HealthResponseEnvelope:
+      type: object
+      additionalProperties: false
+      required: [status, data]
+      properties:
+        status:
+          type: string
+          enum: [success, error]
+          example: success
+        data:
+          type: object
+          required: [status, timestamp, uptime, database]
+          properties:
+            status:
+              type: string
+              enum: [healthy, degraded]
+              example: healthy
+            timestamp:
+              type: string
+              format: date-time
+              example: '2026-09-27T18:55:00.000Z'
+            uptime:
+              type: number
+              example: 124.512
+            database:
+              type: object
+              required: [status, latencyMs, pool]
+              properties:
+                status:
+                  type: string
+                  enum: [healthy, unhealthy]
+                  example: healthy
+                latencyMs:
+                  type: number
+                  example: 1
+                pool:
+                  $ref: '#/components/schemas/DatabasePoolStats'
+
+    LivenessResponseEnvelope:
+      type: object
+      additionalProperties: false
+      required: [status, data]
+      properties:
+        status:
+          type: string
+          enum: [success]
+          example: success
+        data:
+          type: object
+          required: [status, timestamp, uptime]
+          properties:
+            status:
+              type: string
+              enum: [alive]
+              example: alive
+            timestamp:
+              type: string
+              format: date-time
+              example: '2026-09-27T18:55:00.000Z'
+            uptime:
+              type: number
+              example: 124.512
+
+    MetricsResponseEnvelope:
+      type: object
+      additionalProperties: false
+      required: [status, data]
+      properties:
+        status:
+          type: string
+          enum: [success]
+          example: success
+        data:
+          type: object
+          required:
+            - timestamp
+            - uptimeSeconds
+            - processMemoryBytes
+            - requests
+            - securityEvents
+            - routes
+            - databasePool
+          properties:
+            timestamp:
+              type: string
+              format: date-time
+            uptimeSeconds:
+              type: number
+            processMemoryBytes:
+              type: object
+              required: [rss, heapTotal, heapUsed, external]
+              properties:
+                rss:
+                  type: integer
+                heapTotal:
+                  type: integer
+                heapUsed:
+                  type: integer
+                external:
+                  type: integer
+            requests:
+              type: object
+              required: [total, active, byMethod, byStatusClass]
+              properties:
+                total:
+                  type: integer
+                active:
+                  type: integer
+                byMethod:
+                  type: object
+                  additionalProperties:
+                    type: integer
+                byStatusClass:
+                  type: object
+                  required: ['2xx', '4xx', '5xx']
+                  properties:
+                    '2xx':
+                      type: integer
+                    '4xx':
+                      type: integer
+                    '5xx':
+                      type: integer
+            securityEvents:
+              type: object
+              required:
+                - authLoginSuccess
+                - authLoginFailure
+                - authTokenInvalid
+                - authTokenExpired
+                - authzForbidden
+                - rateLimitExceeded
+              properties:
+                authLoginSuccess:
+                  type: integer
+                authLoginFailure:
+                  type: integer
+                authTokenInvalid:
+                  type: integer
+                authTokenExpired:
+                  type: integer
+                authzForbidden:
+                  type: integer
+                rateLimitExceeded:
+                  type: integer
+            routes:
+              type: object
+              additionalProperties:
+                type: object
+                required: [count, errors, avgDurationMs, maxDurationMs]
+                properties:
+                  count:
+                    type: integer
+                  errors:
+                    type: integer
+                  avgDurationMs:
+                    type: number
+                  maxDurationMs:
+                    type: number
+            databasePool:
+              $ref: '#/components/schemas/DatabasePoolStats'
+
+    ValidationErrorField:
+      type: object
+      additionalProperties: false
+      required: [field, message]
+      properties:
+        field:
+          type: string
+          example: currency
+        message:
+          type: string
+          example: "Field 'currency' must be a valid 3-letter uppercase ISO code (e.g. USD, EUR, KES)"
+
+    ErrorCode:
+      type: string
+      enum:
+        - VALIDATION_ERROR
+        - MALFORMED_JSON
+        - AUTHENTICATION_REQUIRED
+        - INVALID_CREDENTIALS
+        - INVALID_TOKEN
+        - TOKEN_EXPIRED
+        - FORBIDDEN
+        - RESOURCE_NOT_FOUND
+        - ROUTE_NOT_FOUND
+        - METHOD_NOT_ALLOWED
+        - DUPLICATE_RESOURCE
+        - CONFLICT
+        - PAYLOAD_TOO_LARGE
+        - RATE_LIMIT_EXCEEDED
+        - SECURITY_CONFIGURATION_ERROR
+        - DATABASE_ERROR
+        - INTERNAL_SERVER_ERROR
+
+    ErrorResponseEnvelope:
+      type: object
+      additionalProperties: false
+      required: [status, error]
+      properties:
+        status:
+          type: string
+          enum: [error]
+          example: error
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              $ref: '#/components/schemas/ErrorCode'
+            message:
+              type: string
+              example: Request validation failed
+            fields:
+              type: array
+              description: Present on `400 VALIDATION_ERROR` when specific request fields or query parameters fail validation.
+              items:
+                $ref: '#/components/schemas/ValidationErrorField'
+            requestId:
+              type: string
+              description: Request correlation ID matching the `X-Request-Id` response header.
+              example: req_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+
+  responses:
+    ValidationErrorResponse:
+      description: Request body, path parameter, or query parameter failed validation (`VALIDATION_ERROR` or `MALFORMED_JSON`).
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponseEnvelope'
+          examples:
+            validationError:
+              summary: Field validation failure
+              value:
+                status: error
+                error:
+                  code: VALIDATION_ERROR
+                  message: Request validation failed
+                  fields:
+                    - field: currency
+                      message: "Field 'currency' must be a valid 3-letter uppercase ISO code (e.g. USD, EUR, KES)"
+                  requestId: req_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+            malformedJson:
+              summary: Malformed JSON syntax
+              value:
+                status: error
+                error:
+                  code: MALFORMED_JSON
+                  message: Invalid JSON payload received in request body
+                  requestId: req_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+
+    UnauthorizedResponse:
+      description: Missing, malformed, tampered, or expired Bearer token (`AUTHENTICATION_REQUIRED`, `INVALID_TOKEN`, or `TOKEN_EXPIRED`).
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponseEnvelope'
+          examples:
+            missingToken:
+              summary: Missing Authorization header
+              value:
+                status: error
+                error:
+                  code: AUTHENTICATION_REQUIRED
+                  message: Authentication is required. Missing Authorization header
+                  requestId: req_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+            invalidToken:
+              summary: Invalid or tampered JWT signature
+              value:
+                status: error
+                error:
+                  code: INVALID_TOKEN
+                  message: Invalid token signature
+                  requestId: req_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+            expiredToken:
+              summary: Expired JWT token
+              value:
+                status: error
+                error:
+                  code: TOKEN_EXPIRED
+                  message: Authentication token has expired
+                  requestId: req_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+
+    ForbiddenResponse:
+      description: Authenticated identity lacks the required role (`admin`) or does not own the target resource (`FORBIDDEN`).
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponseEnvelope'
+          example:
+            status: error
+            error:
+              code: FORBIDDEN
+              message: You are not authorized to perform this action
+              requestId: req_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+
+    NotFoundResponse:
+      description: Requested resource ID does not exist (`RESOURCE_NOT_FOUND`).
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponseEnvelope'
+          example:
+            status: error
+            error:
+              code: RESOURCE_NOT_FOUND
+              message: "Customer with ID 'cus_00000000-0000-4000-8000-000000000000' not found"
+              requestId: req_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+
+    MethodNotAllowedResponse:
+      description: HTTP method is not supported on this route (`METHOD_NOT_ALLOWED`). Includes RFC 9110 `Allow` header.
+      headers:
+        Allow:
+          $ref: '#/components/headers/Allow'
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponseEnvelope'
+          example:
+            status: error
+            error:
+              code: METHOD_NOT_ALLOWED
+              message: "HTTP method PUT is not allowed on /api/v1/customers. Allowed methods: GET, POST"
+              requestId: req_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+
+    ConflictResponse:
+      description: Uniqueness violation (`DUPLICATE_RESOURCE`) or domain state/referential integrity conflict (`CONFLICT`).
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponseEnvelope'
+          examples:
+            duplicateResource:
+              summary: Duplicate email or invoice number
+              value:
+                status: error
+                error:
+                  code: DUPLICATE_RESOURCE
+                  message: "A customer with email 'ap@wayne-enterprises.example.com' already exists"
+                  requestId: req_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+            domainConflict:
+              summary: Referential integrity or finalized invoice lock
+              value:
+                status: error
+                error:
+                  code: CONFLICT
+                  message: "Cannot modify line items or financial amounts of a 'paid' invoice"
+                  requestId: req_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+
+    PayloadTooLargeResponse:
+      description: Request JSON body exceeds the 100kb limit (`PAYLOAD_TOO_LARGE`).
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponseEnvelope'
+          example:
+            status: error
+            error:
+              code: PAYLOAD_TOO_LARGE
+              message: Request payload exceeds the permitted limit (100kb)
+              requestId: req_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+
+    RateLimitExceededResponse:
+      description: Client exceeded the authentication or general API rate limit (`RATE_LIMIT_EXCEEDED`).
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+        X-RateLimit-Limit:
+          $ref: '#/components/headers/X-RateLimit-Limit'
+        X-RateLimit-Remaining:
+          $ref: '#/components/headers/X-RateLimit-Remaining'
+        X-RateLimit-Reset:
+          $ref: '#/components/headers/X-RateLimit-Reset'
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponseEnvelope'
+          example:
+            status: error
+            error:
+              code: RATE_LIMIT_EXCEEDED
+              message: API rate limit exceeded. Please slow down request frequency
+              requestId: req_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+
+paths:
+  /api/v1/health:
+    get:
+      tags: [Health & Observability]
+      summary: System health and PostgreSQL connectivity probe
+      description: Executes a live `SELECT 1` database check and returns process uptime, database round-trip latency, and `pg.Pool` connection statistics.
+      operationId: getHealth
+      responses:
+        '200':
+          description: Application and PostgreSQL connection pool are healthy.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponseEnvelope'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+        '503':
+          description: Database connectivity check failed (`status: degraded`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponseEnvelope'
+
+  /api/v1/health/live:
+    get:
+      tags: [Health & Observability]
+      summary: Process liveness probe
+      description: Lightweight container liveness check that verifies the Node.js event loop is responsive without querying PostgreSQL.
+      operationId: getLiveness
+      responses:
+        '200':
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LivenessResponseEnvelope'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+
+  /api/v1/health/ready:
+    get:
+      tags: [Health & Observability]
+      summary: Instance readiness and database probe
+      description: Verifies that the instance can actively execute queries against PostgreSQL before receiving load-balancer traffic.
+      operationId: getReadiness
+      responses:
+        '200':
+          description: Instance is ready to serve traffic.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponseEnvelope'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+        '503':
+          description: Database is unreachable; remove instance from load-balancer rotation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponseEnvelope'
+
+  /api/v1/metrics:
+    get:
+      tags: [Health & Observability]
+      summary: Operational & security telemetry snapshot
+      description: Returns bounded, low-cardinality operational metrics including memory usage, request status distributions, normalized route latency, security event counters, and PostgreSQL connection pool state.
+      operationId: getMetrics
+      responses:
+        '200':
+          description: Operational metrics snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetricsResponseEnvelope'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+
+  /api/v1/auth/register:
+    post:
+      tags: [Authentication]
+      summary: Register a new operator account
+      description: |
+        Creates a new authentication account with a `crypto.scrypt` password hash and assigns the least-privileged default role (`user`).
+        Protected by both the general API rate limiter and the stricter authentication brute-force rate limiter.
+      operationId: registerAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Account registered successfully. Returns sanitized `AccountDTO` (never returns `passwordHash`).
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data]
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    $ref: '#/components/schemas/AccountDTO'
+        '400':
+          $ref: '#/components/responses/ValidationErrorResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '409':
+          $ref: '#/components/responses/ConflictResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLargeResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+
+  /api/v1/auth/login:
+    post:
+      tags: [Authentication]
+      summary: Authenticate credentials and issue a Bearer JWT
+      description: |
+        Verifies account email and password using timing-safe `crypto.scrypt` verification (including dummy hash derivation on unknown emails to prevent account enumeration) and returns a signed `HS256` JWT Bearer token.
+      operationId: loginAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Credentials verified; Bearer token issued.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data]
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    $ref: '#/components/schemas/AuthTokenData'
+        '400':
+          $ref: '#/components/responses/ValidationErrorResponse'
+        '401':
+          description: Invalid email or password (`INVALID_CREDENTIALS`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponseEnvelope'
+              example:
+                status: error
+                error:
+                  code: INVALID_CREDENTIALS
+                  message: Invalid email or password
+                  requestId: req_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLargeResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+
+  /api/v1/auth/me:
+    get:
+      tags: [Authentication]
+      summary: Retrieve the currently authenticated account profile
+      description: Verifies the Bearer token and returns the current operator's `AccountDTO`.
+      operationId: getAuthenticatedAccount
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Authenticated account profile.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data]
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    $ref: '#/components/schemas/AccountDTO'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '404':
+          $ref: '#/components/responses/NotFoundResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+
+  /api/v1/customers:
+    post:
+      tags: [Customers]
+      summary: Create a new customer
+      description: |
+        Creates a new customer record and binds `accountId` to the authenticated operator's account ID (`req.user.id`).
+        Customer `email` must be unique (case-insensitive) across the ledger.
+      operationId: createCustomer
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCustomerRequest'
+      responses:
+        '201':
+          description: Customer created successfully.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data]
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    $ref: '#/components/schemas/Customer'
+        '400':
+          $ref: '#/components/responses/ValidationErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '409':
+          $ref: '#/components/responses/ConflictResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLargeResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+
+    get:
+      tags: [Customers]
+      summary: List customers with pagination, filtering, and sorting
+      description: |
+        Returns a paginated list of customers.
+        - **`user` role:** Automatically scoped to customers owned by `req.user.id` (`accountId`).
+        - **`admin` role:** Returns customers across all accounts.
+      operationId: listCustomers
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: currency
+          in: query
+          required: false
+          description: Filter by exact 3-letter uppercase ISO 4217 currency code.
+          schema:
+            type: string
+            pattern: '^[A-Z]{3}$'
+            example: USD
+        - name: email
+          in: query
+          required: false
+          description: Filter by exact email address (case-insensitive).
+          schema:
+            type: string
+            format: email
+        - name: name
+          in: query
+          required: false
+          description: Filter by case-insensitive name substring (`ILIKE`).
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+        - name: sort
+          in: query
+          required: false
+          description: Whitelisted customer sort field. Defaults to `createdAt`.
+          schema:
+            type: string
+            enum: [createdAt, updatedAt, name, email]
+            default: createdAt
+        - $ref: '#/components/parameters/OrderParam'
+      responses:
+        '200':
+          description: Paginated customer collection.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data, pagination]
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Customer'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationMeta'
+        '400':
+          $ref: '#/components/responses/ValidationErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+
+  /api/v1/customers/{id}:
+    get:
+      tags: [Customers]
+      summary: Retrieve a customer by ID
+      description: Returns a single customer if the authenticated operator owns the record (`customer.accountId === req.user.id`) or holds the `admin` role.
+      operationId: getCustomerById
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CustomerIdPathParam'
+      responses:
+        '200':
+          description: Customer details.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data]
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    $ref: '#/components/schemas/Customer'
+        '400':
+          $ref: '#/components/responses/ValidationErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/NotFoundResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+
+    patch:
+      tags: [Customers]
+      summary: Update a customer by ID
+      description: Partially updates `name`, `email`, or `currency` for an owned customer (or any customer if `admin`). Rejects empty objects `{}` and immutable fields (`id`, `accountId`, `createdAt`).
+      operationId: updateCustomer
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CustomerIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCustomerRequest'
+      responses:
+        '200':
+          description: Updated customer record.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data]
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    $ref: '#/components/schemas/Customer'
+        '400':
+          $ref: '#/components/responses/ValidationErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/NotFoundResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '409':
+          $ref: '#/components/responses/ConflictResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLargeResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+
+    delete:
+      tags: [Customers]
+      summary: Delete a customer by ID (Admin only)
+      description: |
+        Permanently deletes a customer record.
+        - **Authorization:** Strictly restricted to `admin` role (`user` role receives `403 FORBIDDEN`).
+        - **Referential Integrity:** Returns `409 CONFLICT` (`ON DELETE RESTRICT`) if the customer has one or more associated invoices.
+      operationId: deleteCustomer
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CustomerIdPathParam'
+      responses:
+        '204':
+          description: Customer deleted successfully (no response body).
+        '400':
+          $ref: '#/components/responses/ValidationErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/NotFoundResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '409':
+          $ref: '#/components/responses/ConflictResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+
+  /api/v1/customers/{id}/invoices:
+    post:
+      tags: [Customers, Invoices]
+      summary: Issue a new invoice for a specific customer
+      description: |
+        Creates a multi-item invoice scoped to customer `{id}` inside an atomic PostgreSQL transaction.
+        Inherits the parent customer's `currency` unless explicitly provided (mismatched currencies return `400 VALIDATION_ERROR`).
+      operationId: createInvoiceForCustomer
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CustomerIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCustomerInvoiceRequest'
+      responses:
+        '201':
+          description: Invoice created atomically with computed totals and line items.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data]
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    $ref: '#/components/schemas/Invoice'
+        '400':
+          $ref: '#/components/responses/ValidationErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/NotFoundResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '409':
+          $ref: '#/components/responses/ConflictResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLargeResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+
+    get:
+      tags: [Customers, Invoices]
+      summary: List invoices belonging to a specific customer
+      description: |
+        Returns a paginated, filtered, and sorted list of invoices for customer `{id}`.
+        Verifies customer existence (`404`) and ownership (`403`) before querying invoices.
+        Note: `customerId` is not accepted as a query parameter on this nested route.
+      operationId: listCustomerInvoices
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CustomerIdPathParam'
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: status
+          in: query
+          required: false
+          description: Filter by invoice lifecycle status (case-insensitive).
+          schema:
+            $ref: '#/components/schemas/InvoiceStatus'
+        - name: currency
+          in: query
+          required: false
+          description: Filter by exact 3-letter uppercase ISO 4217 currency code.
+          schema:
+            type: string
+            pattern: '^[A-Z]{3}$'
+        - name: issueDate
+          in: query
+          required: false
+          description: Filter by exact `issueDate` (ISO 8601 timestamp or `YYYY-MM-DD`).
+          schema:
+            type: string
+        - name: issueDateFrom
+          in: query
+          required: false
+          description: Lower bound (`>=`) for `issueDate` (ISO 8601 timestamp or `YYYY-MM-DD`).
+          schema:
+            type: string
+        - name: issueDateTo
+          in: query
+          required: false
+          description: Upper bound (`<=`) for `issueDate` (ISO 8601 timestamp or `YYYY-MM-DD`).
+          schema:
+            type: string
+        - name: dueDate
+          in: query
+          required: false
+          description: Filter by exact `dueDate` (ISO 8601 timestamp or `YYYY-MM-DD`).
+          schema:
+            type: string
+        - name: dueDateFrom
+          in: query
+          required: false
+          description: Lower bound (`>=`) for `dueDate` (ISO 8601 timestamp or `YYYY-MM-DD`).
+          schema:
+            type: string
+        - name: dueDateTo
+          in: query
+          required: false
+          description: Upper bound (`<=`) for `dueDate` (ISO 8601 timestamp or `YYYY-MM-DD`).
+          schema:
+            type: string
+        - name: sort
+          in: query
+          required: false
+          description: Whitelisted invoice sort field. Defaults to `createdAt`.
+          schema:
+            type: string
+            enum: [createdAt, updatedAt, issueDate, dueDate, total, subtotal, invoiceNumber, status]
+            default: createdAt
+        - $ref: '#/components/parameters/OrderParam'
+      responses:
+        '200':
+          description: Paginated invoices for the specified customer.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data, pagination]
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Invoice'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationMeta'
+        '400':
+          $ref: '#/components/responses/ValidationErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/NotFoundResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+
+  /api/v1/invoices:
+    post:
+      tags: [Invoices]
+      summary: Issue a new multi-item invoice
+      description: |
+        Creates an invoice and its line items atomically inside a PostgreSQL transaction.
+        - Verifies `customerId` exists (`404`) and is owned by the caller or caller is `admin` (`403`).
+        - Computes `lineTotal`, `subtotal`, and `total` server-side in integer cents.
+      operationId: createInvoice
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInvoiceRequest'
+      responses:
+        '201':
+          description: Invoice created successfully.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data]
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    $ref: '#/components/schemas/Invoice'
+        '400':
+          $ref: '#/components/responses/ValidationErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/NotFoundResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '409':
+          $ref: '#/components/responses/ConflictResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLargeResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+
+    get:
+      tags: [Invoices]
+      summary: List invoices with pagination, filtering, and sorting
+      description: |
+        Returns a paginated list of invoices with their nested `items[]` hydrated in a single batched query.
+        - **`user` role:** Automatically restricted to invoices whose parent customer belongs to `req.user.id`.
+        - **`admin` role:** Returns invoices across all accounts.
+      operationId: listInvoices
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: customerId
+          in: query
+          required: false
+          description: Filter by parent customer ID (`cus_<uuid>`).
+          schema:
+            type: string
+            pattern: '^cus_[a-zA-Z0-9_-]+$'
+        - name: status
+          in: query
+          required: false
+          description: Filter by invoice status (case-insensitive).
+          schema:
+            $ref: '#/components/schemas/InvoiceStatus'
+        - name: currency
+          in: query
+          required: false
+          description: Filter by exact 3-letter uppercase ISO 4217 currency code.
+          schema:
+            type: string
+            pattern: '^[A-Z]{3}$'
+        - name: issueDate
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: issueDateFrom
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: issueDateTo
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: dueDate
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: dueDateFrom
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: dueDateTo
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: sort
+          in: query
+          required: false
+          description: Whitelisted invoice sort field. Defaults to `createdAt`.
+          schema:
+            type: string
+            enum: [createdAt, updatedAt, issueDate, dueDate, total, subtotal, invoiceNumber, status]
+            default: createdAt
+        - $ref: '#/components/parameters/OrderParam'
+      responses:
+        '200':
+          description: Paginated invoice collection.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data, pagination]
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Invoice'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationMeta'
+        '400':
+          $ref: '#/components/responses/ValidationErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+
+  /api/v1/invoices/{id}:
+    get:
+      tags: [Invoices]
+      summary: Retrieve an invoice and its line items by ID
+      description: Returns the invoice and its ordered `items[]` if the authenticated user owns the parent customer or holds the `admin` role.
+      operationId: getInvoiceById
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/InvoiceIdPathParam'
+      responses:
+        '200':
+          description: Invoice details with nested line items.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data]
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    $ref: '#/components/schemas/Invoice'
+        '400':
+          $ref: '#/components/responses/ValidationErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/NotFoundResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+
+    patch:
+      tags: [Invoices]
+      summary: Update an invoice and/or replace its line items
+      description: |
+        Updates mutable invoice attributes (`status`, `tax`, `discount`, `dueDate`, `notes`, `items`) inside an atomic transaction.
+        - Recomputes `subtotal` and `total` server-side whenever `items`, `tax`, or `discount` change.
+        - Returns `409 CONFLICT` if attempting to modify `items`, `tax`, or `discount` on an invoice whose current status is `paid` or `cancelled`.
+      operationId: updateInvoice
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/InvoiceIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateInvoiceRequest'
+      responses:
+        '200':
+          description: Updated invoice with recalculated totals.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data]
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    $ref: '#/components/schemas/Invoice'
+        '400':
+          $ref: '#/components/responses/ValidationErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/NotFoundResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '409':
+          $ref: '#/components/responses/ConflictResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLargeResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+
+    delete:
+      tags: [Invoices]
+      summary: Delete an invoice by ID (Admin only)
+      description: |
+        Permanently deletes an invoice and cascades deletion to its child `invoice_items` (`ON DELETE CASCADE`).
+        Strictly restricted to `admin` accounts (`user` accounts receive `403 FORBIDDEN`).
+      operationId: deleteInvoice
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/InvoiceIdPathParam'
+      responses:
+        '204':
+          description: Invoice and child line items deleted (no response body).
+        '400':
+          $ref: '#/components/responses/ValidationErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/NotFoundResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'
+
+  /api/v1/invoices/{id}/items:
+    get:
+      tags: [Invoices]
+      summary: List paginated line items for a specific invoice
+      description: |
+        Verifies that invoice `{id}` exists (`404`) and that the authenticated actor owns its parent customer (`403`), then returns a paginated, filtered, and sorted collection of `InvoiceItem` records.
+      operationId: listInvoiceItems
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/InvoiceIdPathParam'
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: description
+          in: query
+          required: false
+          description: Filter line items by case-insensitive description substring (`ILIKE`).
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 500
+        - name: sort
+          in: query
+          required: false
+          description: Whitelisted line-item sort field. Defaults to `createdAt`.
+          schema:
+            type: string
+            enum: [createdAt, quantity, unitPrice, lineTotal, description]
+            default: createdAt
+        - $ref: '#/components/parameters/OrderParam'
+      responses:
+        '200':
+          description: Paginated invoice line items.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data, pagination]
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/InvoiceItem'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationMeta'
+        '400':
+          $ref: '#/components/responses/ValidationErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '403':
+          $ref: '#/components/responses/ForbiddenResponse'
+        '404':
+          $ref: '#/components/responses/NotFoundResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowedResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitExceededResponse'

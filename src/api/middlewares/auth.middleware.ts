@@ -1,6 +1,12 @@
 import { Request, Response, NextFunction } from 'express';
 import { TokenService } from '../services/token.service.js';
-import { AuthenticationRequiredError, InvalidTokenError } from '../services/errors.js';
+import {
+  AuthenticationRequiredError,
+  InvalidTokenError,
+  TokenExpiredError,
+} from '../services/errors.js';
+import { logger } from '../observability/logger.js';
+import { metricsCollector } from '../observability/metrics.js';
 
 export interface AuthenticateMiddleware {
   (req: Request, res: Response, next: NextFunction): void;
@@ -47,6 +53,19 @@ export function createAuthMiddleware(tokenService: TokenService): AuthenticateMi
 
       next();
     } catch (err) {
+      if (err instanceof TokenExpiredError) {
+        metricsCollector.recordSecurityEvent('authTokenExpired');
+        logger.warn('auth_token_expired', err.message, {
+          path: req.originalUrl || req.url,
+          method: req.method,
+        });
+      } else if (err instanceof InvalidTokenError) {
+        metricsCollector.recordSecurityEvent('authTokenInvalid');
+        logger.warn('auth_token_invalid', err.message, {
+          path: req.originalUrl || req.url,
+          method: req.method,
+        });
+      }
       next(err);
     }
   };

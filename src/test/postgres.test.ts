@@ -116,6 +116,7 @@ describe('Billing System REST API - Phase 2 & Phase 5 PostgreSQL Integration Tes
       assert.ok(result.alreadyApplied.includes('003_add_authorization_role_and_ownership.sql'));
       assert.ok(result.alreadyApplied.includes('004_create_invoices_and_items_tables.sql'));
       assert.ok(result.alreadyApplied.includes('005_add_pagination_and_filtering_indexes.sql'));
+      assert.ok(result.alreadyApplied.includes('006_add_composite_scaling_indexes.sql'));
     });
 
     it('schema_migrations table tracks applied migrations', async () => {
@@ -126,6 +127,7 @@ describe('Billing System REST API - Phase 2 & Phase 5 PostgreSQL Integration Tes
       assert.ok(names.includes('003_add_authorization_role_and_ownership.sql'));
       assert.ok(names.includes('004_create_invoices_and_items_tables.sql'));
       assert.ok(names.includes('005_add_pagination_and_filtering_indexes.sql'));
+      assert.ok(names.includes('006_add_composite_scaling_indexes.sql'));
     });
   });
 

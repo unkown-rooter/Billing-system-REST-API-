@@ -87,20 +87,20 @@ describe('Billing System REST API - Phase 8 Service & Repository Integration Tes
           }
 
           if (sql.includes('INSERT INTO invoice_items')) {
-            return {
-              rows: [
-                {
-                  id: params[0],
-                  invoice_id: params[1],
-                  description: params[2],
-                  quantity: params[3],
-                  unit_price: params[4],
-                  line_total: params[5],
-                  created_at: params[6],
-                  updated_at: params[7],
-                },
-              ],
-            };
+            const rows = [];
+            for (let i = 0; i < params.length; i += 8) {
+              rows.push({
+                id: params[i],
+                invoice_id: params[i + 1],
+                description: params[i + 2],
+                quantity: params[i + 3],
+                unit_price: params[i + 4],
+                line_total: params[i + 5],
+                created_at: params[i + 6],
+                updated_at: params[i + 7],
+              });
+            }
+            return { rows };
           }
 
           return { rows: [] };
@@ -119,16 +119,15 @@ describe('Billing System REST API - Phase 8 Service & Repository Integration Tes
       const repo = new PostgresInvoiceRepository(mockPool as any);
       const created = await repo.create(invoiceFixture);
 
-      assert.deepEqual(executedStatements, ['BEGIN', 'INSERT', 'INSERT', 'INSERT', 'COMMIT']);
+      assert.deepEqual(executedStatements, ['BEGIN', 'INSERT', 'INSERT', 'COMMIT']);
       assert.equal(clientReleased, true);
       assert.equal(created.items.length, 2);
       assert.equal(created.subtotal, 250.0);
     });
 
-    it('issues ROLLBACK and always releases client when second line item insert fails mid-transaction', async () => {
+    it('issues ROLLBACK and always releases client when line item insert fails mid-transaction', async () => {
       const executedStatements: string[] = [];
       let clientReleased = false;
-      let itemInsertCount = 0;
 
       const invoiceFixture = buildInvoiceEntityFixture({
         items: [
@@ -156,7 +155,7 @@ describe('Billing System REST API - Phase 8 Service & Repository Integration Tes
       });
 
       const mockClient = {
-        async query(sql: string, params: any[] = []) {
+        async query(sql: string) {
           const verb = sql.trim().split(/\s+/)[0].toUpperCase();
           executedStatements.push(verb);
 
@@ -184,26 +183,9 @@ describe('Billing System REST API - Phase 8 Service & Repository Integration Tes
           }
 
           if (sql.includes('INSERT INTO invoice_items')) {
-            itemInsertCount += 1;
-            if (itemInsertCount === 2) {
-              throw Object.assign(new Error('new row for relation "invoice_items" violates check constraint'), {
-                code: '23514',
-              });
-            }
-            return {
-              rows: [
-                {
-                  id: params[0],
-                  invoice_id: params[1],
-                  description: params[2],
-                  quantity: params[3],
-                  unit_price: params[4],
-                  line_total: params[5],
-                  created_at: params[6],
-                  updated_at: params[7],
-                },
-              ],
-            };
+            throw Object.assign(new Error('new row for relation "invoice_items" violates check constraint'), {
+              code: '23514',
+            });
           }
 
           return { rows: [] };
@@ -223,7 +205,7 @@ describe('Billing System REST API - Phase 8 Service & Repository Integration Tes
       await assert.rejects(repo.create(invoiceFixture), ValidationError);
 
       // Verify transaction was rolled back and connection was returned to pool
-      assert.deepEqual(executedStatements, ['BEGIN', 'INSERT', 'INSERT', 'INSERT', 'ROLLBACK']);
+      assert.deepEqual(executedStatements, ['BEGIN', 'INSERT', 'INSERT', 'ROLLBACK']);
       assert.equal(clientReleased, true);
     });
 

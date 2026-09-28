@@ -58,6 +58,8 @@ spec:
               value: "1"
             - name: ENABLE_HSTS
               value: "true"
+            - name: LOG_LEVEL
+              value: "info"
             - name: JWT_EXPIRES_IN
               value: "86400"
             # Restrictive CORS Policy (server-to-server / same-origin posture; no wildcard '*')
@@ -72,6 +74,15 @@ spec:
               value: "60000"
             - name: API_RATE_LIMIT_MAX
               value: "300"
+            # Database Connection Pool Sizing (maxScale 4 * DB_POOL_MAX 10 = 40 max connections)
+            - name: DB_POOL_MAX
+              value: "10"
+            - name: DB_POOL_IDLE_TIMEOUT_MS
+              value: "30000"
+            - name: DB_POOL_CONNECTION_TIMEOUT_MS
+              value: "5000"
+            - name: DB_STATEMENT_TIMEOUT_MS
+              value: "10000"
             # Required Production Secrets (injected at runtime from Secret Manager; never hardcoded)
             - name: DATABASE_URL
               valueFrom:
@@ -87,19 +98,19 @@ spec:
             limits:
               cpu: "1000m"
               memory: 512Mi
-          # Truthful Startup Probe -> Express -> PostgreSQL `SELECT 1`
+          # Truthful Startup Readiness Probe -> Express -> PostgreSQL `SELECT 1`
           startupProbe:
             httpGet:
-              path: /api/v1/health
+              path: /api/v1/health/ready
               port: 3000
             initialDelaySeconds: 2
             periodSeconds: 5
             timeoutSeconds: 4
             failureThreshold: 6
-          # Truthful Periodic Liveness Probe -> Express -> PostgreSQL `SELECT 1`
+          # Process Liveness Probe -> Express `/api/v1/health/live` (prevents restart storms on transient DB blips)
           livenessProbe:
             httpGet:
-              path: /api/v1/health
+              path: /api/v1/health/live
               port: 3000
             initialDelaySeconds: 10
             periodSeconds: 30

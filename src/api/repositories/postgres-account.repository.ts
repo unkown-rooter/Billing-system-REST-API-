@@ -3,6 +3,7 @@ import { Account, AccountRole, DEFAULT_ACCOUNT_ROLE, isValidAccountRole } from '
 import { IAccountRepository } from './account.repository.interface.js';
 import { DuplicateResourceError, DatabaseError, ValidationError } from '../services/errors.js';
 import { redactSensitiveText } from '../security/redaction.js';
+import { logger } from '../observability/logger.js';
 
 interface AccountRow {
   id: string;
@@ -49,7 +50,12 @@ export class PostgresAccountRepository implements IAccountRepository {
       }
     }
     const rawMsg = err instanceof Error ? err.message : String(err);
-    console.error('[POSTGRES ACCOUNT REPO] Operational query failure:', redactSensitiveText(rawMsg));
+    const safeMsg = redactSensitiveText(rawMsg);
+    logger.error('db_query_error', `[POSTGRES ACCOUNT REPO] Operational query failure: ${safeMsg}`, {
+      repository: 'PostgresAccountRepository',
+      operationMessage: defaultMessage,
+      error: safeMsg,
+    });
     throw new DatabaseError(defaultMessage);
   }
 
