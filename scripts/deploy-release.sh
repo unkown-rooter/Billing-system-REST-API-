@@ -13,17 +13,20 @@ case "${1:-}" in
   --preview)
     MODE="preview"
     ;;
+  --source-release)
+    MODE="source-release"
+    ;;
   --execute)
     MODE="execute"
     ;;
   *)
-    echo "Usage: $0 [--preview|--execute]" >&2
+    echo "Usage: $0 [--preview|--source-release|--execute]" >&2
     exit 2
     ;;
 esac
 
 if [ "$#" -gt 1 ]; then
-  echo "Usage: $0 [--preview|--execute]" >&2
+  echo "Usage: $0 [--preview|--source-release|--execute]" >&2
   exit 2
 fi
 
@@ -104,11 +107,58 @@ if [ "$MODE" = "preview" ]; then
   cat <<EOF
 [RELEASE] Proposed actions after inputs and approvals are ready:
   1. Run npm ci, npm run lint, and npm test.
-  2. Create GitHub source release ${RELEASE_TAG} from the clean current commit.
+  2. After the repository is public, run --source-release to publish GitHub source release ${RELEASE_TAG}.
   3. Build and push ${GCP_REGION:-<GCP_REGION>}-docker.pkg.dev/${GCP_PROJECT_ID:-<GCP_PROJECT_ID>}/${ARTIFACT_REGISTRY_REPOSITORY:-<AR_REPOSITORY>}/${IMAGE_NAME}:${RELEASE_VERSION}.
   4. Run ${MIGRATION_JOB_NAME} with the production DATABASE_URL secret and Cloud SQL attachment.
   5. Deploy ${SERVICE_NAME} with the immutable image digest and smoke-test ${PUBLIC_API_URL:-<PUBLIC_API_URL>}.
 EOF
+  exit 0
+fi
+
+if [ "$MODE" = "source-release" ]; then
+  if [ "${CONFIRM_SOURCE_RELEASE:-}" != "YES" ]; then
+    echo "[RELEASE ERROR] Set CONFIRM_SOURCE_RELEASE=YES to authorize creating the GitHub source release and tag." >&2
+    exit 1
+  fi
+  if [ -n "$(git status --porcelain)" ]; then
+    echo "[RELEASE ERROR] Source release requires a clean, committed worktree." >&2
+    exit 1
+  fi
+  RELEASE_COMMIT="${RELEASE_COMMIT:-$(git rev-parse HEAD)}"
+  if [ "$(git rev-parse HEAD)" != "$RELEASE_COMMIT" ]; then
+    echo "[RELEASE ERROR] HEAD must equal the approved RELEASE_COMMIT." >&2
+    exit 1
+  fi
+  for tool in gh; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "[RELEASE ERROR] Required command not found: $tool" >&2
+      exit 1
+    fi
+  done
+  gh auth status
+  REPOSITORY_VISIBILITY="$(gh repo view --json visibility --jq .visibility)"
+  if [ "$REPOSITORY_VISIBILITY" != "PUBLIC" ]; then
+    echo "[RELEASE ERROR] Repository must be public before publishing a discoverable source release." >&2
+    exit 1
+  fi
+  if git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"; then
+    echo "[RELEASE ERROR] Local tag ${RELEASE_TAG} already exists." >&2
+    exit 1
+  fi
+  if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+    echo "[RELEASE ERROR] GitHub release ${RELEASE_TAG} already exists." >&2
+    exit 1
+  fi
+  if [ -n "$(git ls-remote --tags origin "refs/tags/${RELEASE_TAG}")" ]; then
+    echo "[RELEASE ERROR] Remote tag ${RELEASE_TAG} already exists." >&2
+    exit 1
+  fi
+  echo "[RELEASE] Running source-release verification..."
+  npm ci
+  npm run lint
+  npm test
+  echo "[RELEASE] Publishing GitHub source release ${RELEASE_TAG} from ${RELEASE_COMMIT}..."
+  gh release create "$RELEASE_TAG" --target "$RELEASE_COMMIT" --title "$RELEASE_TAG" --generate-notes
   exit 0
 fi
 
@@ -139,13 +189,12 @@ if git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"; then
   exit 1
 fi
 
-for tool in npm gh gcloud docker curl; do
+for tool in npm gcloud docker curl; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "[RELEASE ERROR] Required command not found: $tool" >&2
     exit 1
   fi
 done
-gh auth status
 gcloud auth list --filter=status:ACTIVE --format='value(account)' | grep -q .
 
 IMAGE_TAG_URI="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REGISTRY_REPOSITORY}/${IMAGE_NAME}:${RELEASE_VERSION}"
@@ -161,18 +210,6 @@ gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 gcloud artifacts repositories describe "$ARTIFACT_REGISTRY_REPOSITORY" \
   --project "$GCP_PROJECT_ID" \
   --location "$GCP_REGION" >/dev/null
-
-if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-  echo "[RELEASE ERROR] GitHub release ${RELEASE_TAG} already exists." >&2
-  exit 1
-fi
-if [ -n "$(git ls-remote --tags origin "refs/tags/${RELEASE_TAG}")" ]; then
-  echo "[RELEASE ERROR] Remote tag ${RELEASE_TAG} already exists." >&2
-  exit 1
-fi
-
-echo "[RELEASE] Publishing GitHub source release ${RELEASE_TAG}..."
-gh release create "$RELEASE_TAG" --target "$RELEASE_COMMIT" --title "$RELEASE_TAG" --generate-notes
 
 echo "[RELEASE] Pushing the versioned image to Artifact Registry..."
 docker push "$IMAGE_TAG_URI"

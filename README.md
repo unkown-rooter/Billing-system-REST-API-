@@ -10,7 +10,7 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15%2B-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![OpenAPI](https://img.shields.io/badge/OpenAPI-3.1.0-6BA539?style=for-the-badge&logo=openapiinitiative&logoColor=white)](./openapi.yaml)
 [![Docker](https://img.shields.io/badge/Docker-Multi--Stage-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-194%20Default%20%7C%20247%20Total-10B981?style=for-the-badge&logo=checkmarx&logoColor=white)](#verification--testing)
+[![Tests](https://img.shields.io/badge/Tests-195%20Default%20%7C%20248%20Total-10B981?style=for-the-badge&logo=checkmarx&logoColor=white)](#verification--testing)
 [![License](https://img.shields.io/badge/License-MIT-F59E0B?style=for-the-badge)](./LICENSE)
 
 [Overview](#project-description) •
@@ -848,13 +848,13 @@ docker compose down
 
 ## Verification & Testing
 
-The repository enforces three-way database isolation (`Development DB ≠ Automated Test DB ≠ Production DB`) via programmatic guards (`assertSafeTestDatabaseUrl` and `assertSafeProductionDatabaseUrl`) and separates the **default fast verification suite (`npm test` — 194 tests across 12 suites)** from the **extended PostgreSQL, scaling, Docker, deployment, and documentation suites (`npm run test:all` — 247 tests across 17 suites)**:
+The repository enforces three-way database isolation (`Development DB ≠ Automated Test DB ≠ Production DB`) via programmatic guards (`assertSafeTestDatabaseUrl` and `assertSafeProductionDatabaseUrl`) and separates the **default fast verification suite (`npm test` — 195 tests across 12 suites)** from the **extended PostgreSQL, scaling, Docker, deployment, and documentation suites (`npm run test:all` — 248 tests across 17 suites)**:
 
 ```bash
 # TypeScript strict type-checking (client + server)
 npm run lint
 
-# Default fast suite: unit, service-repository transaction, HTTP contract, validation, auth, RBAC, relational, pagination, security, observability & release-config suites (194 tests / 12 suites)
+# Default fast suite: unit, service-repository transaction, HTTP contract, validation, auth, RBAC, relational, pagination, security, observability & release-config suites (195 tests / 12 suites)
 npm test
 
 # Structured logging, X-Request-Id correlation, security event telemetry & metrics suite (10 tests — also included in npm test)
@@ -875,7 +875,7 @@ npm run test:deploy
 # Extended Suite 5: OpenAPI 3.1 contract parity, public documentation completeness & end-to-end onboarding verification suite (12 tests)
 npm run test:docs
 
-# Execute the complete 17-suite verification pyramid (194 default + 53 extended = 247 total tests)
+# Execute the complete 17-suite verification pyramid (195 default + 53 extended = 248 total tests)
 npm run test:all
 ```
 
@@ -883,11 +883,18 @@ npm run test:all
 
 ## Controlled v1.0.0 Release
 
-The release script supports a non-mutating preview by default and requires an explicit execution flag plus a separate production confirmation before creating a GitHub release/tag, pushing an image, running migrations, or deploying Cloud Run:
+Publishing the source on GitHub does not require deploying or hosting the API. After the repository has been made public through the GitHub settings, the GitHub-only release path can create the source tag and release. It refuses to publish while the repository is private and requires an explicit confirmation:
 
 ```bash
-npm run deploy:release -- --preview
-# Only after the release commit, cloud resources, IAM, and load balancer are approved and ready:
+npm run deploy:release -- --source-release
+# To actually create the GitHub source tag and release, from a clean, committed checkout
+# of the approved v1.0.0 source, after the repository is public:
+CONFIRM_SOURCE_RELEASE=YES npm run deploy:release -- --source-release
+```
+
+This source-only operation does not need GCP credentials and does not build/push a container, run database migrations, or deploy Cloud Run. The general `--preview` remains non-mutating. Cloud deployment, if chosen later, is a separate operation and requires the following inputs and explicit production confirmation:
+
+```bash
 CONFIRM_PRODUCTION_RELEASE=YES CLOUD_ARMOR_READY=true \
   GCP_PROJECT_ID=<project-id> \
   GCP_REGION=<region> \
@@ -900,13 +907,13 @@ CONFIRM_PRODUCTION_RELEASE=YES CLOUD_ARMOR_READY=true \
   npm run deploy:release -- --execute
 ```
 
-Before execution, the worktree must be clean and the release commit must match `HEAD`. The Artifact Registry repository, Cloud SQL instance, secret versions and IAM grants must already exist. `DATABASE_URL` and `JWT_SECRET` values are read from Secret Manager, not from `.env` or command-line arguments. The database URL must use the chosen Cloud SQL connector/network mode. The configured service account needs Cloud SQL connectivity and access to the referenced secrets; the external load balancer and Cloud Armor policy must be configured before the run. The service manifest restricts Cloud Run ingress to internal traffic and the Cloud Load Balancing path. The script deploys by image digest and performs a readiness check through `PUBLIC_API_URL`; keep the previous Cloud Run revision available for rollback.
+Before source release, the worktree must be clean and `HEAD` must equal the approved release commit. Cloud deployment additionally requires the Artifact Registry repository, Cloud SQL instance, secret versions, and IAM grants to exist. Secret values are read from Secret Manager, not from `.env` or command-line arguments. The database URL must use the chosen Cloud SQL connector/network mode. The external load balancer and Cloud Armor policy must already be configured. The deployment manifest restricts Cloud Run ingress to internal traffic and Cloud Load Balancing; deployment uses an immutable image digest and checks readiness through `PUBLIC_API_URL`. Cloud deployment has not been run or verified against a live GCP environment.
 
 ---
 
 ## Project Status
 
-**Status:** **Production-ready codebase for v1.0.0; source release and production deployment are pending**
+**Status:** **Release preparation implemented; public GitHub release and live production readiness verification are pending**
 
 | Phase | Capability Area | Status | Verification Coverage |
 |---|---|---|---|
@@ -923,7 +930,8 @@ Before execution, the worktree must be clean and the release commit must match `
 | **Phase 11** | **Production Deployment & Three-Way Database Isolation** | Complete | `deployment.test.ts` |
 | **Phase 12** | **Structured JSON Logging, Correlation IDs & Metrics** | Complete | `observability.test.ts` |
 | **Phase 13** | **Horizontal Scaling, Composite Indexing & Batched Writes** | Complete | `scaling.test.ts` |
-| **Phase 14** | **Developer Readiness, OpenAPI 3.1 Spec & Public Release** | Complete | `developer-readiness.test.ts` |
+| **Phase 14** | **Developer Readiness & OpenAPI 3.1 Spec** | Complete | `developer-readiness.test.ts` |
+| **GitHub v1.0.0 Source Release** | **Public repository visibility and GitHub source release** | Pending owner approval | `scripts/deploy-release.sh --source-release` |
 
 ---
 

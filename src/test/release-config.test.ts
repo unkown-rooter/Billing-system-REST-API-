@@ -67,4 +67,22 @@ describe('Cloud Run release configuration rendering', () => {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it('requires explicit approval before attempting a GitHub source release', () => {
+    const scriptPath = path.join(workspaceRoot, 'scripts', 'deploy-release.sh');
+
+    assert.throws(
+      () =>
+        execFileSync('bash', [scriptPath, '--source-release'], {
+          env: { ...process.env, CONFIRM_SOURCE_RELEASE: '' },
+          stdio: 'pipe',
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        const stderr = 'stderr' in error ? String(error.stderr) : error.message;
+        assert.match(stderr, /CONFIRM_SOURCE_RELEASE=YES/);
+        return true;
+      }
+    );
+  });
 });
