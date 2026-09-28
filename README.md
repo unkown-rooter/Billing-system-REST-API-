@@ -10,7 +10,7 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15%2B-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![OpenAPI](https://img.shields.io/badge/OpenAPI-3.1.0-6BA539?style=for-the-badge&logo=openapiinitiative&logoColor=white)](./openapi.yaml)
 [![Docker](https://img.shields.io/badge/Docker-Multi--Stage-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-192%20Default%20%7C%20245%20Total-10B981?style=for-the-badge&logo=checkmarx&logoColor=white)](#verification--testing)
+[![Tests](https://img.shields.io/badge/Tests-195%20Default%20%7C%20248%20Total-10B981?style=for-the-badge&logo=checkmarx&logoColor=white)](#verification--testing)
 [![License](https://img.shields.io/badge/License-MIT-F59E0B?style=for-the-badge)](./LICENSE)
 
 [Overview](#project-description) •
@@ -723,7 +723,7 @@ cp .env.example .env
 | `ENABLE_HSTS` | **Config** | Optional | `false` (`true` in prod) | Emits `Strict-Transport-Security: max-age=31536000; includeSubDomains`. |
 | `LOG_LEVEL` | **Config** | Optional | `info` | Minimum structured JSON log level (`debug`, `info`, `warn`, `error`). Clamped to `info` in `production`. |
 | `JWT_EXPIRES_IN` | **Optional** | Optional | `86400` | JWT expiration lifetime in seconds. Must be a finite positive integer in `1..2592000` (up to 30 days). Defaults to `86400` (24h) only when unset; malformed, zero, negative, decimal, or out-of-range values fail closed with `SecurityConfigurationError`. |
-| `RATE_LIMIT_MODE` | **Optional** | Optional | `process_local` | Rate-limiting mode: `process_local` (default per-instance in-memory store), `edge_enforced` (Cloud Run / API Gateway / Cloud Armor global edge enforcement + per-instance ceiling), or `shared_store` (requires an injected `RateLimitStore` adapter). |
+| `RATE_LIMIT_MODE` | **Optional** | Optional | `process_local` | Rate-limiting mode: `process_local` (default per-instance in-memory store), `edge_enforced` (requires separately configured Cloud Armor/load-balancer or other edge policy plus this per-instance ceiling), or `shared_store` (requires an injected `RateLimitStore` adapter). |
 | `AUTH_RATE_LIMIT_WINDOW_MS` | **Optional** | Optional | `60000` | Rate-limit window in milliseconds for `/api/v1/auth/login` and `/register`. |
 | `AUTH_RATE_LIMIT_MAX` | **Optional** | Optional | `30` | Maximum authentication requests per window per client IP (per instance unless edge/shared limiter is used). |
 | `API_RATE_LIMIT_WINDOW_MS` | **Optional** | Optional | `60000` | Rate-limit window in milliseconds for general `/api/v1/*` endpoints. |
@@ -834,7 +834,7 @@ docker compose down
 ### 1. Stateless vs. Process-Local Component Boundaries
 - **Stateless Across Horizontal Instances:** JWT authentication (`HS256` signed with shared `JWT_SECRET`), RBAC role evaluation, customer/invoice ownership enforcement (`accountId` in PostgreSQL), and request correlation (`AsyncLocalStorage` per HTTP request) require **zero sticky sessions**. Any request can be routed to any container replica (`1 → 4 → 20` instances).
 - **Process-Local Components & Production Global Enforcement:**
-  - **Rate Limiting (`createRateLimiter`):** By default (`RATE_LIMIT_MODE=process_local`), the middleware uses a bounded in-memory store (`InMemoryRateLimitStore`, `MAX_TRACKED_KEYS = 10,000`) scoped to a single Node.js process. **It is not a global rate limiter across multi-instance deployments**—across $N$ instances behind a load balancer, a client IP can issue up to $N \times \text{max}$ requests per window. For strict global enforcement in production (e.g., Google Cloud Run `cloudrun.service.yaml`), either configure edge/API gateway rate limiting (`RATE_LIMIT_MODE=edge_enforced` with Google Cloud Armor or Cloud API Gateway) or inject a shared `RateLimitStore` adapter (`RATE_LIMIT_MODE=shared_store` via `AppDependencies.rateLimitStore` / `RateLimitOptions.store`).
+  - **Rate Limiting (`createRateLimiter`):** By default (`RATE_LIMIT_MODE=process_local`), the middleware uses a bounded in-memory store (`InMemoryRateLimitStore`, `MAX_TRACKED_KEYS = 10,000`) scoped to a single Node.js process. **It is not a global rate limiter across multi-instance deployments**—across $N$ instances behind a load balancer, a client IP can issue up to $N \times \text{max}$ requests per window. For global enforcement in production, configure Cloud Armor on the external Application Load Balancer and restrict Cloud Run ingress as in `cloudrun.service.yaml`, or inject a shared `RateLimitStore` adapter (`RATE_LIMIT_MODE=shared_store` via `AppDependencies.rateLimitStore` / `RateLimitOptions.store`). `RATE_LIMIT_MODE=edge_enforced` does not provision or activate an edge policy by itself.
   - **Operational Metrics (`metricsCollector`):** Maintains bounded per-instance route counters (`MAX_ROUTE_BUCKETS = 100`) and live `pg.Pool` saturation telemetry (`max`, `totalCount`, `idleCount`, `waitingCount`, `activeCount`), while structured JSON logs on `stdout`/`stderr` are aggregated centrally across all instances.
 
 ### 2. Connection Pool Capacity Planning (`API Instances × DB_POOL_MAX`)
@@ -848,13 +848,13 @@ docker compose down
 
 ## Verification & Testing
 
-The repository enforces three-way database isolation (`Development DB ≠ Automated Test DB ≠ Production DB`) via programmatic guards (`assertSafeTestDatabaseUrl` and `assertSafeProductionDatabaseUrl`) and separates the **default fast verification suite (`npm test` — 192 tests across 11 suites)** from the **extended PostgreSQL, scaling, Docker, deployment, and documentation suites (`npm run test:all` — 245 tests across 16 suites)**:
+The repository enforces three-way database isolation (`Development DB ≠ Automated Test DB ≠ Production DB`) via programmatic guards (`assertSafeTestDatabaseUrl` and `assertSafeProductionDatabaseUrl`) and separates the **default fast verification suite (`npm test` — 195 tests across 12 suites)** from the **extended PostgreSQL, scaling, Docker, deployment, and documentation suites (`npm run test:all` — 248 tests across 17 suites)**:
 
 ```bash
 # TypeScript strict type-checking (client + server)
 npm run lint
 
-# Default fast suite: unit, service-repository transaction, HTTP contract, validation, auth, RBAC, relational, pagination, security & observability suites (192 tests / 11 suites)
+# Default fast suite: unit, service-repository transaction, HTTP contract, validation, auth, RBAC, relational, pagination, security, observability & release-config suites (195 tests / 12 suites)
 npm test
 
 # Structured logging, X-Request-Id correlation, security event telemetry & metrics suite (10 tests — also included in npm test)
@@ -875,15 +875,45 @@ npm run test:deploy
 # Extended Suite 5: OpenAPI 3.1 contract parity, public documentation completeness & end-to-end onboarding verification suite (12 tests)
 npm run test:docs
 
-# Execute the complete 16-suite verification pyramid (192 default + 53 extended = 245 total tests)
+# Execute the complete 17-suite verification pyramid (195 default + 53 extended = 248 total tests)
 npm run test:all
 ```
 
 ---
 
+## Controlled v1.0.0 Release
+
+Publishing the source on GitHub does not require deploying or hosting the API. After the repository has been made public through the GitHub settings, the GitHub-only release path can create the source tag and release. It refuses to publish while the repository is private and requires an explicit confirmation:
+
+```bash
+npm run deploy:release -- --source-release
+# To actually create the GitHub source tag and release, from a clean, committed checkout
+# of the approved v1.0.0 source, after the repository is public:
+CONFIRM_SOURCE_RELEASE=YES npm run deploy:release -- --source-release
+```
+
+This source-only operation does not need GCP credentials and does not build/push a container, run database migrations, or deploy Cloud Run. The general `--preview` remains non-mutating. Cloud deployment, if chosen later, is a separate operation and requires the following inputs and explicit production confirmation:
+
+```bash
+CONFIRM_PRODUCTION_RELEASE=YES CLOUD_ARMOR_READY=true \
+  GCP_PROJECT_ID=<project-id> \
+  GCP_REGION=<region> \
+  ARTIFACT_REGISTRY_REPOSITORY=<repository> \
+  CLOUD_SQL_CONNECTION_NAME=<project>:<region>:<instance> \
+  CLOUD_RUN_SERVICE_ACCOUNT=<service-account-email> \
+  DATABASE_URL_SECRET_NAME=<database-url-secret-id> \
+  JWT_SECRET_SECRET_NAME=<jwt-secret-id> \
+  PUBLIC_API_URL=https://<api-hostname> \
+  npm run deploy:release -- --execute
+```
+
+Before source release, the worktree must be clean and `HEAD` must equal the approved release commit. Cloud deployment additionally requires the Artifact Registry repository, Cloud SQL instance, secret versions, and IAM grants to exist. Secret values are read from Secret Manager, not from `.env` or command-line arguments. The database URL must use the chosen Cloud SQL connector/network mode. The external load balancer and Cloud Armor policy must already be configured. The deployment manifest restricts Cloud Run ingress to internal traffic and Cloud Load Balancing; deployment uses an immutable image digest and checks readiness through `PUBLIC_API_URL`. Cloud deployment has not been run or verified against a live GCP environment.
+
+---
+
 ## Project Status
 
-**Status:** **Production-Ready Public Release (`v1.0.0`) — All 14 Engineering Phases Complete**
+**Status:** **Release preparation implemented; public GitHub release and live production readiness verification are pending**
 
 | Phase | Capability Area | Status | Verification Coverage |
 |---|---|---|---|
@@ -900,7 +930,8 @@ npm run test:all
 | **Phase 11** | **Production Deployment & Three-Way Database Isolation** | Complete | `deployment.test.ts` |
 | **Phase 12** | **Structured JSON Logging, Correlation IDs & Metrics** | Complete | `observability.test.ts` |
 | **Phase 13** | **Horizontal Scaling, Composite Indexing & Batched Writes** | Complete | `scaling.test.ts` |
-| **Phase 14** | **Developer Readiness, OpenAPI 3.1 Spec & Public Release** | Complete | `developer-readiness.test.ts` |
+| **Phase 14** | **Developer Readiness & OpenAPI 3.1 Spec** | Complete | `developer-readiness.test.ts` |
+| **GitHub v1.0.0 Source Release** | **Public repository visibility and GitHub source release** | Pending owner approval | `scripts/deploy-release.sh --source-release` |
 
 ---
 

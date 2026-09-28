@@ -9,7 +9,7 @@
 #
 # Rollback Command (zero-downtime traffic shift to prior immutable revision):
 #   gcloud run services update-traffic billing-system-api \
-#     --region=europe-west2 \
+#     --region="$GCP_REGION" \
 #     --to-revisions=<PREVIOUS_KNOWN_GOOD_REVISION>=100
 # ============================================================================
 
@@ -18,11 +18,14 @@ kind: Service
 metadata:
   name: billing-system-api
   labels:
-    cloud.googleapis.com/location: europe-west2
+    cloud.googleapis.com/location: __GCP_REGION__
     app.kubernetes.io/name: billing-system-api
     app.kubernetes.io/phase: phase-11-production
   annotations:
-    run.googleapis.com/ingress: all
+    # Only the external Application Load Balancer may receive internet traffic.
+    run.googleapis.com/ingress: internal-and-cloud-load-balancing
+    # Public API traffic is authenticated at the application; ingress blocks run.app bypass.
+    run.googleapis.com/invoker-iam-disabled: "true"
     run.googleapis.com/description: "Billing System REST API (Phase 11 Production Deployment)"
 spec:
   template:
@@ -32,13 +35,15 @@ spec:
         autoscaling.knative.dev/maxScale: "4"
         run.googleapis.com/execution-environment: gen2
         run.googleapis.com/startup-cpu-boost: "true"
+        run.googleapis.com/cloudsql-instances: __CLOUD_SQL_CONNECTION_NAME__
     spec:
+      serviceAccountName: __CLOUD_RUN_SERVICE_ACCOUNT__
       containerConcurrency: 80
       timeoutSeconds: 60
       containers:
         - name: billing-api-runtime
-          # Built from the Phase 10 multi-stage Dockerfile (`runtime` target stage)
-          image: europe-west2-docker.pkg.dev/billing-system-prod/containers/billing-system-api:phase11
+          # Rendered with the immutable Artifact Registry image digest.
+          image: __IMAGE_URI__
           command: ["node"]
           args: ["dist-server/server.js"]
           ports:
@@ -68,9 +73,8 @@ spec:
             # Rate Limiting Configuration
             # NOTE: The built-in Express rate limiter uses a bounded process-local store per container
             # instance (with maxScale: 4, per-instance limits act as an instance-level safety ceiling
-            # of up to N * max across replicas). For strict global cross-instance enforcement in
-            # production, deploy behind Google Cloud Armor / Cloud API Gateway edge rate limiting
-            # (`RATE_LIMIT_MODE: "edge_enforced"`) or wire a shared `RateLimitStore` adapter.
+            # of up to N * max across replicas). Cloud Armor on the external load balancer
+            # provides global enforcement; this remains the per-instance safety ceiling.
             - name: RATE_LIMIT_MODE
               value: "edge_enforced"
             - name: AUTH_RATE_LIMIT_WINDOW_MS
@@ -94,12 +98,12 @@ spec:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: billing-prod-database-url
+                  name: __DATABASE_URL_SECRET_NAME__
                   key: latest
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: billing-prod-jwt-secret
+                  name: __JWT_SECRET_SECRET_NAME__
                   key: latest
           resources:
             limits:

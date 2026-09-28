@@ -18,7 +18,8 @@
     "migrate": "tsx src/api/db/migrate.ts",
     "migrate:prod": "node dist-server/src/api/db/migrate.js",
     "deploy:release": "bash scripts/deploy-release.sh",
-    "test": "tsx src/test/unit/domain-and-services.unit.test.ts && tsx src/test/integration/service-repository.integration.test.ts && tsx src/test/http/http-contracts-and-security.test.ts && tsx src/test/api.test.ts && tsx src/test/validation.test.ts && tsx src/test/auth.test.ts && tsx src/test/authorization.test.ts && tsx src/test/relationships.test.ts && tsx src/test/pagination.test.ts && tsx src/test/security.test.ts && tsx src/test/observability.test.ts",
+    "test": "tsx src/test/unit/domain-and-services.unit.test.ts && tsx src/test/integration/service-repository.integration.test.ts && tsx src/test/http/http-contracts-and-security.test.ts && tsx src/test/api.test.ts && tsx src/test/validation.test.ts && tsx src/test/auth.test.ts && tsx src/test/authorization.test.ts && tsx src/test/relationships.test.ts && tsx src/test/pagination.test.ts && tsx src/test/security.test.ts && tsx src/test/observability.test.ts && tsx src/test/release-config.test.ts",
+    "test:release-config": "tsx src/test/release-config.test.ts",
     "test:unit": "tsx src/test/unit/domain-and-services.unit.test.ts",
     "test:service-integration": "tsx src/test/integration/service-repository.integration.test.ts",
     "test:http": "tsx src/test/http/http-contracts-and-security.test.ts",
@@ -57,7 +58,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
-    "esbuild": "^0.25.0",
+    "esbuild": "^0.28.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2"
