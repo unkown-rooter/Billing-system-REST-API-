@@ -365,15 +365,18 @@ describe('Billing System REST API - Phase 4 Authentication & Identity Test Suite
       });
 
       it('rejects request with expired token (401 TOKEN_EXPIRED)', async () => {
-        // Generate an expired token (expiresInSeconds = -10)
+        // Generate an already-expired token using a valid 60s window issued 120s in the past
         const expiredTokenService = new TokenService({
           secret: 'test-secret-key-for-auth-tests-must-be-at-least-32-chars!',
-          expiresInSeconds: -10,
+          expiresInSeconds: 60,
         });
-        const expiredToken = expiredTokenService.generateToken({
-          id: 'acc_expired_user',
-          email: 'expired@billing.com',
-        });
+        const expiredToken = expiredTokenService.generateToken(
+          {
+            id: 'acc_expired_user',
+            email: 'expired@billing.com',
+          },
+          { issuedAtSeconds: Math.floor(Date.now() / 1000) - 120 }
+        );
 
         const res = await fetch(`${baseUrl}/api/v1/auth/me`, {
           headers: { Authorization: `Bearer ${expiredToken}` },

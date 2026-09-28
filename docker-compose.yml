@@ -3,8 +3,14 @@
 # ============================================================================
 # NOTE: This file is strictly for local development and containerized integration
 # testing (API container + externalized PostgreSQL 15 container over a bridge network).
-# It is NOT a production cloud deployment configuration (Phase 11).
-# Never commit real production secrets in this file.
+# It is NOT a production cloud deployment configuration (see cloudrun.service.yaml).
+#
+# SECURITY WARNING — DEVELOPMENT-ONLY CREDENTIALS:
+# All fallback passwords (`postgres_local_dev_only`) and fallback JWT signing keys
+# (`dev-only-local-compose-jwt-secret-do-not-use-in-production`) defined below are
+# strictly for local development convenience. Production startup (`NODE_ENV=production`)
+# fails closed with `SecurityConfigurationError` if any development-only fallback or
+# placeholder secret is used. Never commit real production credentials.
 # ============================================================================
 
 services:
@@ -14,6 +20,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      # DEVELOPMENT-ONLY fallback password for local Docker Compose; rejected in NODE_ENV=production
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_local_dev_only}
       POSTGRES_DB: ${POSTGRES_DB:-billing_system}
     ports:
@@ -40,12 +47,17 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      NODE_ENV: production
+      # Defaults to 'development' so local `docker compose up` works out-of-the-box with
+      # development-only fallback credentials while NODE_ENV=production fails closed.
+      NODE_ENV: ${NODE_ENV:-development}
       HOST: 0.0.0.0
       PORT: 3000
+      # DEVELOPMENT-ONLY database connection fallback for local Docker bridge network
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres_local_dev_only}@postgres:5432/${POSTGRES_DB:-billing_system}
-      JWT_SECRET: ${JWT_SECRET:-local-compose-jwt-secret-key-minimum-32-chars-override-in-prod}
+      # DEVELOPMENT-ONLY fallback JWT secret; rejected by resolveAndValidateJwtSecret in NODE_ENV=production
+      JWT_SECRET: ${JWT_SECRET:-dev-only-local-compose-jwt-secret-do-not-use-in-production}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-86400}
+      RATE_LIMIT_MODE: ${RATE_LIMIT_MODE:-process_local}
       AUTH_RATE_LIMIT_WINDOW_MS: ${AUTH_RATE_LIMIT_WINDOW_MS:-60000}
       AUTH_RATE_LIMIT_MAX: ${AUTH_RATE_LIMIT_MAX:-30}
       API_RATE_LIMIT_WINDOW_MS: ${API_RATE_LIMIT_WINDOW_MS:-60000}

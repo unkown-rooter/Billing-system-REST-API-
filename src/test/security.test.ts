@@ -7,7 +7,13 @@ import { InMemoryAccountRepository } from '../api/repositories/in-memory-account
 import { InMemoryCustomerRepository } from '../api/repositories/in-memory-customer.repository.js';
 import { InMemoryInvoiceRepository } from '../api/repositories/in-memory-invoice.repository.js';
 import { PasswordService } from '../api/services/password.service.js';
-import { TokenService, resolveAndValidateJwtSecret } from '../api/services/token.service.js';
+import {
+  TokenService,
+  resolveAndValidateJwtSecret,
+  resolveAndValidateJwtExpiresIn,
+  DEV_COMPOSE_FALLBACK_JWT_SECRET,
+} from '../api/services/token.service.js';
+import { assertSafeProductionDatabaseCredentials } from '../api/db/pool.js';
 import { SecurityConfigurationError } from '../api/services/errors.js';
 import { redactSensitiveUrl, redactSensitiveText, stripControlChars } from '../api/security/redaction.js';
 import {
@@ -282,6 +288,36 @@ describe('Billing System REST API - Phase 9 Security Hardening Test Suite', () =
           ),
         SecurityConfigurationError
       );
+
+      // Docker Compose development-only fallback secret in production
+      assert.throws(
+        () => resolveAndValidateJwtSecret(DEV_COMPOSE_FALLBACK_JWT_SECRET, 'production'),
+        SecurityConfigurationError
+      );
+
+      // Development-only database credentials in production fail closed
+      assert.throws(
+        () =>
+          assertSafeProductionDatabaseCredentials(
+            'postgresql://postgres:postgres_local_dev_only@postgres:5432/billing_prod'
+          ),
+        SecurityConfigurationError
+      );
+      assert.throws(
+        () =>
+          assertSafeProductionDatabaseCredentials(
+            'postgresql://username:password@db.internal:5432/billing_prod'
+          ),
+        SecurityConfigurationError
+      );
+
+      // Invalid JWT_EXPIRES_IN in production fails closed with SecurityConfigurationError
+      for (const invalidExp of ['0', '-60', '3.14', 'invalid', '99999999']) {
+        assert.throws(
+          () => resolveAndValidateJwtExpiresIn(undefined, invalidExp, 'production'),
+          SecurityConfigurationError
+        );
+      }
 
       // Short secret (< 32 chars) in production
       assert.throws(

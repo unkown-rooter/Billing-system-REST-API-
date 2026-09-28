@@ -13,6 +13,7 @@ import {
   createAuthRateLimiter,
   createApiRateLimiter,
   RateLimitOptions,
+  RateLimitStore,
 } from './middlewares/rate-limit.middleware.js';
 import { ICustomerRepository } from './repositories/customer.repository.interface.js';
 import { PostgresCustomerRepository } from './repositories/postgres-customer.repository.js';
@@ -23,7 +24,7 @@ import { InMemoryAccountRepository } from './repositories/in-memory-account.repo
 import { IInvoiceRepository } from './repositories/invoice.repository.interface.js';
 import { PostgresInvoiceRepository } from './repositories/postgres-invoice.repository.js';
 import { InMemoryInvoiceRepository } from './repositories/in-memory-invoice.repository.js';
-import { getPool } from './db/pool.js';
+import { getPool, assertSafeProductionDatabaseCredentials } from './db/pool.js';
 import { CustomerService } from './services/customer.service.js';
 import { CustomerController } from './controllers/customer.controller.js';
 import { InvoiceService } from './services/invoice.service.js';
@@ -53,6 +54,7 @@ export interface AppDependencies {
   corsOptions?: CorsPolicyOptions;
   authRateLimitOptions?: Partial<RateLimitOptions>;
   apiRateLimitOptions?: Partial<RateLimitOptions>;
+  rateLimitStore?: RateLimitStore;
 }
 
 export function createApp(deps: AppDependencies = {}): Express {
@@ -76,14 +78,13 @@ export function createApp(deps: AppDependencies = {}): Express {
 
   // 3. Dependency Wiring (Inversion of Control)
   const isPostgres = Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim().length > 0);
-  if (
-    process.env.NODE_ENV === 'production' &&
-    !deps.customerRepository &&
-    !isPostgres
-  ) {
-    throw new SecurityConfigurationError(
-      'Production security error: DATABASE_URL environment variable must be explicitly set in production'
-    );
+  if (process.env.NODE_ENV === 'production' && !deps.customerRepository) {
+    if (!isPostgres) {
+      throw new SecurityConfigurationError(
+        'Production security error: DATABASE_URL environment variable must be explicitly set in production'
+      );
+    }
+    assertSafeProductionDatabaseCredentials(process.env.DATABASE_URL!);
   }
 
   // Customer & Invoice Relational Persistence
@@ -116,8 +117,14 @@ export function createApp(deps: AppDependencies = {}): Express {
   const authenticate = createAuthMiddleware(tokenService);
 
   // Rate Limiters (Brute-Force Auth Limiter + General API Flood Limiter)
-  const authRateLimiter = createAuthRateLimiter(deps.authRateLimitOptions);
-  const apiRateLimiter = createApiRateLimiter(deps.apiRateLimitOptions);
+  const authRateLimiter = createAuthRateLimiter({
+    ...(deps.rateLimitStore ? { store: deps.rateLimitStore } : {}),
+    ...deps.authRateLimitOptions,
+  });
+  const apiRateLimiter = createApiRateLimiter({
+    ...(deps.rateLimitStore ? { store: deps.rateLimitStore } : {}),
+    ...deps.apiRateLimitOptions,
+  });
 
   // Health Diagnostics
   const healthController =

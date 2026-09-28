@@ -8,9 +8,15 @@ import { AccountRole, DEFAULT_ACCOUNT_ROLE, isValidAccountRole } from '../models
 
 export const MIN_JWT_SECRET_LENGTH = 32;
 export const MAX_TOKEN_LENGTH = 4096;
+export const DEFAULT_JWT_EXPIRES_IN_SECONDS = 86400; // 24 hours
+export const MIN_JWT_EXPIRES_IN_SECONDS = 1;
+export const MAX_JWT_EXPIRES_IN_SECONDS = 2_592_000; // 30 days (30 * 24 * 60 * 60)
 
 const DEV_FALLBACK_JWT_SECRET =
   'billing-api-development-secret-key-do-not-use-in-production-min32chars';
+
+export const DEV_COMPOSE_FALLBACK_JWT_SECRET =
+  'dev-only-local-compose-jwt-secret-do-not-use-in-production';
 
 const INSECURE_PLACEHOLDER_SECRETS = new Set([
   'MY_JWT_SECRET',
@@ -19,6 +25,9 @@ const INSECURE_PLACEHOLDER_SECRETS = new Set([
   'password',
   'default',
   DEV_FALLBACK_JWT_SECRET,
+  DEV_COMPOSE_FALLBACK_JWT_SECRET,
+  'local-compose-jwt-secret-key-minimum-32-chars-override-in-prod',
+  'dev-only-jwt-secret-replace-before-production-min-32-chars',
 ]);
 
 export interface JwtPayload {
@@ -33,6 +42,10 @@ export interface TokenServiceConfig {
   secret?: string;
   expiresInSeconds?: number;
   nodeEnv?: string;
+}
+
+export interface GenerateTokenOptions {
+  issuedAtSeconds?: number;
 }
 
 /**
@@ -76,6 +89,68 @@ export function resolveAndValidateJwtSecret(
     : DEV_FALLBACK_JWT_SECRET;
 }
 
+/**
+ * Validates JWT expiration configuration (`TokenServiceConfig.expiresInSeconds` or `JWT_EXPIRES_IN`).
+ * Accepts only finite positive integers within [1, 2_592_000] seconds (up to 30 days).
+ * Uses the 24-hour default (86,400s) only when the configuration is missing (`undefined`).
+ * Never silently accepts malformed, zero, negative, decimal, non-numeric, or excessively large values.
+ */
+export function resolveAndValidateJwtExpiresIn(
+  configuredExpiresIn?: number,
+  envExpiresIn: string | undefined = process.env.JWT_EXPIRES_IN,
+  nodeEnv: string = process.env.NODE_ENV ?? 'development'
+): number {
+  const prefix =
+    nodeEnv === 'production'
+      ? 'Production security error'
+      : 'Invalid JWT expiration configuration';
+
+  if (configuredExpiresIn !== undefined) {
+    if (
+      typeof configuredExpiresIn !== 'number' ||
+      !Number.isFinite(configuredExpiresIn) ||
+      !Number.isInteger(configuredExpiresIn) ||
+      configuredExpiresIn < MIN_JWT_EXPIRES_IN_SECONDS ||
+      configuredExpiresIn > MAX_JWT_EXPIRES_IN_SECONDS
+    ) {
+      throw new SecurityConfigurationError(
+        `${prefix}: expiresInSeconds must be a finite integer between ${MIN_JWT_EXPIRES_IN_SECONDS} and ${MAX_JWT_EXPIRES_IN_SECONDS} seconds`
+      );
+    }
+    return configuredExpiresIn;
+  }
+
+  if (envExpiresIn === undefined) {
+    return DEFAULT_JWT_EXPIRES_IN_SECONDS;
+  }
+
+  if (typeof envExpiresIn !== 'string') {
+    throw new SecurityConfigurationError(
+      `${prefix}: JWT_EXPIRES_IN must be a positive integer between ${MIN_JWT_EXPIRES_IN_SECONDS} and ${MAX_JWT_EXPIRES_IN_SECONDS} seconds`
+    );
+  }
+
+  const trimmed = envExpiresIn.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    throw new SecurityConfigurationError(
+      `${prefix}: JWT_EXPIRES_IN must be a positive integer between ${MIN_JWT_EXPIRES_IN_SECONDS} and ${MAX_JWT_EXPIRES_IN_SECONDS} seconds`
+    );
+  }
+
+  const parsed = Number(trimmed);
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed < MIN_JWT_EXPIRES_IN_SECONDS ||
+    parsed > MAX_JWT_EXPIRES_IN_SECONDS
+  ) {
+    throw new SecurityConfigurationError(
+      `${prefix}: JWT_EXPIRES_IN must be a finite integer between ${MIN_JWT_EXPIRES_IN_SECONDS} and ${MAX_JWT_EXPIRES_IN_SECONDS} seconds`
+    );
+  }
+
+  return parsed;
+}
+
 function base64UrlEncode(input: string | Buffer): string {
   const buf = typeof input === 'string' ? Buffer.from(input, 'utf-8') : input;
   return buf
@@ -109,10 +184,13 @@ export class TokenService {
   private readonly expiresInSeconds: number;
 
   constructor(config?: TokenServiceConfig) {
-    this.secret = resolveAndValidateJwtSecret(config?.secret, config?.nodeEnv);
-    this.expiresInSeconds =
-      config?.expiresInSeconds ||
-      (process.env.JWT_EXPIRES_IN ? parseInt(process.env.JWT_EXPIRES_IN, 10) : 86400); // 24 hours
+    const nodeEnv = config?.nodeEnv ?? process.env.NODE_ENV ?? 'development';
+    this.secret = resolveAndValidateJwtSecret(config?.secret, nodeEnv);
+    this.expiresInSeconds = resolveAndValidateJwtExpiresIn(
+      config?.expiresInSeconds,
+      process.env.JWT_EXPIRES_IN,
+      nodeEnv
+    );
   }
 
   getExpiresInSeconds(): number {
@@ -122,9 +200,30 @@ export class TokenService {
   /**
    * Generates a signed JWT Bearer token for an account identity.
    */
-  generateToken(account: { id: string; email: string; role?: AccountRole }): string {
-    const now = Math.floor(Date.now() / 1000);
+  generateToken(
+    account: { id: string; email: string; role?: AccountRole },
+    options?: GenerateTokenOptions
+  ): string {
+    const now = options?.issuedAtSeconds ?? Math.floor(Date.now() / 1000);
+    if (typeof now !== 'number' || !Number.isFinite(now) || !Number.isInteger(now) || now <= 0) {
+      throw new InvalidTokenError('Invalid token issue timestamp (iat)');
+    }
+    if (
+      typeof this.expiresInSeconds !== 'number' ||
+      !Number.isFinite(this.expiresInSeconds) ||
+      !Number.isInteger(this.expiresInSeconds) ||
+      this.expiresInSeconds < MIN_JWT_EXPIRES_IN_SECONDS ||
+      this.expiresInSeconds > MAX_JWT_EXPIRES_IN_SECONDS
+    ) {
+      throw new SecurityConfigurationError(
+        `Invalid JWT expiration configuration: expiresInSeconds must be a finite integer between ${MIN_JWT_EXPIRES_IN_SECONDS} and ${MAX_JWT_EXPIRES_IN_SECONDS} seconds`
+      );
+    }
+
     const exp = now + this.expiresInSeconds;
+    if (!Number.isFinite(exp) || !Number.isInteger(exp) || exp <= now) {
+      throw new InvalidTokenError('Invalid token expiration timestamp (exp)');
+    }
     const role: AccountRole = account.role ?? DEFAULT_ACCOUNT_ROLE;
 
     if (!isValidAccountRole(role)) {

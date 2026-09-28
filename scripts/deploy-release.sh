@@ -35,18 +35,20 @@ fi
 # 2. Verify strict Production Database Separation (Production DB != Dev DB != Test DB)
 node --input-type=module -e "
 import { assertSafeProductionDatabaseUrl } from './dist-server/src/api/db/pool.js';
-import { resolveAndValidateJwtSecret } from './dist-server/src/api/services/token.service.js';
+import { resolveAndValidateJwtSecret, resolveAndValidateJwtExpiresIn } from './dist-server/src/api/services/token.service.js';
 assertSafeProductionDatabaseUrl(process.env.DATABASE_URL, { disallowDevDbName: true });
 resolveAndValidateJwtSecret(process.env.JWT_SECRET, 'production');
+resolveAndValidateJwtExpiresIn(undefined, process.env.JWT_EXPIRES_IN, 'production');
 console.log('[DEPLOY] Pre-flight security and database isolation checks passed.');
 " 2>/dev/null || {
   echo "[DEPLOY] Building server artifacts before running pre-flight verification..."
   npm run build
   node --input-type=module -e "
 import { assertSafeProductionDatabaseUrl } from './dist-server/src/api/db/pool.js';
-import { resolveAndValidateJwtSecret } from './dist-server/src/api/services/token.service.js';
+import { resolveAndValidateJwtSecret, resolveAndValidateJwtExpiresIn } from './dist-server/src/api/services/token.service.js';
 assertSafeProductionDatabaseUrl(process.env.DATABASE_URL, { disallowDevDbName: true });
 resolveAndValidateJwtSecret(process.env.JWT_SECRET, 'production');
+resolveAndValidateJwtExpiresIn(undefined, process.env.JWT_EXPIRES_IN, 'production');
 console.log('[DEPLOY] Pre-flight security and database isolation checks passed.');
 "
 }

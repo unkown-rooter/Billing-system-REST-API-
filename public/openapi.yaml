@@ -196,15 +196,17 @@ components:
       properties:
         token:
           type: string
-          description: Signed RFC 7519 HS256 JWT Bearer token.
-          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhY2NfY2I1ZDE1M2UtYTA2MS00NWFjLWIzMzgtYWNhYTkxNmJkNWU1IiwiZW1haWwiOiJiaWxsaW5nLm9wc0BhY21lLWNvcnAuZXhhbXBsZS5jb20iLCJyb2xlIjoidXNlciIsImlhdCI6MTc1ODk1NDk3NCwiZXhwIjoxNzU5MDQxMzc0fQ.example_signature_do_not_use
+          description: Signed RFC 7519 HS256 JWT Bearer token (`<header>.<payload>.<signature>`).
+          example: '<SIGNED_HS256_JWT_TOKEN>'
         tokenType:
           type: string
           enum: [Bearer]
           example: Bearer
         expiresIn:
           type: integer
-          description: Token lifetime in seconds (defaults to 86400 / 24 hours).
+          minimum: 1
+          maximum: 2592000
+          description: Token lifetime in seconds (finite positive integer `1..2,592,000`; defaults to `86400` / 24 hours).
           example: 86400
         account:
           $ref: '#/components/schemas/AccountDTO'
@@ -1724,31 +1726,37 @@ paths:
         - name: issueDate
           in: query
           required: false
+          description: Filter by exact `issueDate` (ISO 8601 timestamp or `YYYY-MM-DD`).
           schema:
             type: string
         - name: issueDateFrom
           in: query
           required: false
+          description: Lower bound (`>=`) for `issueDate` (ISO 8601 timestamp or `YYYY-MM-DD`).
           schema:
             type: string
         - name: issueDateTo
           in: query
           required: false
+          description: Upper bound (`<=`) for `issueDate` (ISO 8601 timestamp or `YYYY-MM-DD`).
           schema:
             type: string
         - name: dueDate
           in: query
           required: false
+          description: Filter by exact `dueDate` (ISO 8601 timestamp or `YYYY-MM-DD`).
           schema:
             type: string
         - name: dueDateFrom
           in: query
           required: false
+          description: Lower bound (`>=`) for `dueDate` (ISO 8601 timestamp or `YYYY-MM-DD`).
           schema:
             type: string
         - name: dueDateTo
           in: query
           required: false
+          description: Upper bound (`<=`) for `dueDate` (ISO 8601 timestamp or `YYYY-MM-DD`).
           schema:
             type: string
         - name: sort

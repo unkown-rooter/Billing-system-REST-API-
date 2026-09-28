@@ -12,8 +12,9 @@ async function startServer(): Promise<void> {
   const PORT = Number(process.env.PORT) || 3000;
   const HOST = process.env.HOST || '0.0.0.0';
 
-  // Mount Vite dev middleware only in non-production; serve static dist files in production
-  if (process.env.NODE_ENV !== 'production') {
+  // Mount Vite dev middleware in local source development; serve compiled dist/ in production or container runtime
+  const hasRootIndexHtml = fs.existsSync(path.resolve(process.cwd(), 'index.html'));
+  if (process.env.NODE_ENV !== 'production' && hasRootIndexHtml) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },

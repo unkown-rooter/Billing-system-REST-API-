@@ -10,7 +10,7 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15%2B-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![OpenAPI](https://img.shields.io/badge/OpenAPI-3.1.0-6BA539?style=for-the-badge&logo=openapiinitiative&logoColor=white)](./openapi.yaml)
 [![Docker](https://img.shields.io/badge/Docker-Multi--Stage-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-242%20Passing-10B981?style=for-the-badge&logo=checkmarx&logoColor=white)](#verification--testing)
+[![Tests](https://img.shields.io/badge/Tests-192%20Default%20%7C%20245%20Total-10B981?style=for-the-badge&logo=checkmarx&logoColor=white)](#verification--testing)
 [![License](https://img.shields.io/badge/License-MIT-F59E0B?style=for-the-badge)](./LICENSE)
 
 [Overview](#project-description) •
@@ -280,7 +280,7 @@ You can import `openapi.yaml` directly into **Postman**, **Insomnia**, **Swagger
   {
     "status": "success",
     "data": {
-      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhY2NfY2I1ZDE1M2UtYTA2MS00NWFjLWIzMzgtYWNhYTkxNmJkNWU1IiwiZW1haWwiOiJiaWxsaW5nLm9wc0BhY21lLWNvcnAuZXhhbXBsZS5jb20iLCJyb2xlIjoidXNlciIsImlhdCI6MTc1ODk1NDk3NCwiZXhwIjoxNzU5MDQxMzc0fQ.example_signature_do_not_use",
+      "token": "<SIGNED_HS256_JWT_TOKEN>",
       "tokenType": "Bearer",
       "expiresIn": 86400,
       "account": {
@@ -713,8 +713,8 @@ cp .env.example .env
 
 | Variable | Category | Required in Prod | Default | Description |
 |---|---|---|---|---|
-| `DATABASE_URL` | **Secret** | **Yes** | — | PostgreSQL connection URI (`postgresql://<user>:<password>@<host>:5432/<dbname>`). Fails closed if unset in `production`. |
-| `JWT_SECRET` | **Secret** | **Yes** | — | High-entropy HMAC-SHA256 signing secret (`>= 32` characters). Fails closed in `production` if missing, weak, or set to a placeholder. |
+| `DATABASE_URL` | **Secret** | **Yes** | — | PostgreSQL connection URI (`postgresql://<user>:<password>@<host>:5432/<dbname>`). Fails closed in `production` if unset or if a development-only fallback credential (`postgres_local_dev_only`, `username:password`) is used. |
+| `JWT_SECRET` | **Secret** | **Yes** | — | High-entropy HMAC-SHA256 signing secret (`>= 32` characters). Fails closed in `production` if missing, weak, or set to a development-only placeholder/fallback key. |
 | `NODE_ENV` | **Config** | **Yes** | `development` | Runtime environment (`development` or `production`). |
 | `PORT` | **Config** | **Yes** | `3000` | HTTP server listening port. |
 | `HOST` | **Config** | Optional | `0.0.0.0` | Network interface bind address. |
@@ -722,11 +722,12 @@ cp .env.example .env
 | `CORS_ALLOWED_ORIGINS` | **Config** | Optional | `""` | Comma-separated allowlist of trusted browser origins. Empty string disables cross-origin access. |
 | `ENABLE_HSTS` | **Config** | Optional | `false` (`true` in prod) | Emits `Strict-Transport-Security: max-age=31536000; includeSubDomains`. |
 | `LOG_LEVEL` | **Config** | Optional | `info` | Minimum structured JSON log level (`debug`, `info`, `warn`, `error`). Clamped to `info` in `production`. |
-| `JWT_EXPIRES_IN` | **Optional** | Optional | `86400` | JWT expiration lifetime in seconds (24 hours). |
+| `JWT_EXPIRES_IN` | **Optional** | Optional | `86400` | JWT expiration lifetime in seconds. Must be a finite positive integer in `1..2592000` (up to 30 days). Defaults to `86400` (24h) only when unset; malformed, zero, negative, decimal, or out-of-range values fail closed with `SecurityConfigurationError`. |
+| `RATE_LIMIT_MODE` | **Optional** | Optional | `process_local` | Rate-limiting mode: `process_local` (default per-instance in-memory store), `edge_enforced` (Cloud Run / API Gateway / Cloud Armor global edge enforcement + per-instance ceiling), or `shared_store` (requires an injected `RateLimitStore` adapter). |
 | `AUTH_RATE_LIMIT_WINDOW_MS` | **Optional** | Optional | `60000` | Rate-limit window in milliseconds for `/api/v1/auth/login` and `/register`. |
-| `AUTH_RATE_LIMIT_MAX` | **Optional** | Optional | `30` | Maximum authentication requests per window per client IP. |
+| `AUTH_RATE_LIMIT_MAX` | **Optional** | Optional | `30` | Maximum authentication requests per window per client IP (per instance unless edge/shared limiter is used). |
 | `API_RATE_LIMIT_WINDOW_MS` | **Optional** | Optional | `60000` | Rate-limit window in milliseconds for general `/api/v1/*` endpoints. |
-| `API_RATE_LIMIT_MAX` | **Optional** | Optional | `300` | Maximum general API requests per window per client IP. |
+| `API_RATE_LIMIT_MAX` | **Optional** | Optional | `300` | Maximum general API requests per window per client IP (per instance unless edge/shared limiter is used). |
 | `DB_POOL_MAX` | **Optional** | Optional | `10` | Maximum PostgreSQL connections per API instance (`N instances × DB_POOL_MAX < max_connections`). |
 | `DB_POOL_IDLE_TIMEOUT_MS` | **Optional** | Optional | `30000` | Idle client retention window in milliseconds before closing unused pooled connections. |
 | `DB_POOL_CONNECTION_TIMEOUT_MS` | **Optional** | Optional | `5000` | Maximum wait time in milliseconds to acquire a connection from the pool before failing. |
@@ -746,7 +747,7 @@ psql -U postgres -h 127.0.0.1 -c "CREATE DATABASE billing_system;"
 psql -U postgres -h 127.0.0.1 -c "CREATE DATABASE billing_system_test;"
 ```
 
-Apply all SQL migrations (`migrations/001` through `migrations/006`). The transactional migration runner (`src/api/db/migrate.ts`) tracks applied files in `schema_migrations` and safely skips already-applied migrations:
+Apply all SQL migrations (`migrations/001` through `migrations/006`). The transactional migration runner (`src/api/db/migrate.ts`) acquires a PostgreSQL session-level advisory lock (`pg_advisory_lock` / `pg_advisory_unlock` in a `finally` block) to serialize concurrent deployments, executes each migration inside an atomic `BEGIN ... COMMIT / ROLLBACK` transaction, and tracks applied files in `schema_migrations`:
 
 ```bash
 # Development (TypeScript via tsx)
@@ -832,8 +833,8 @@ docker compose down
 
 ### 1. Stateless vs. Process-Local Component Boundaries
 - **Stateless Across Horizontal Instances:** JWT authentication (`HS256` signed with shared `JWT_SECRET`), RBAC role evaluation, customer/invoice ownership enforcement (`accountId` in PostgreSQL), and request correlation (`AsyncLocalStorage` per HTTP request) require **zero sticky sessions**. Any request can be routed to any container replica (`1 → 4 → 20` instances).
-- **Process-Local Components & Trade-offs:**
-  - **Rate Limiting (`createRateLimiter`):** Uses a bounded in-memory sliding/fixed window map (`MAX_TRACKED_KEYS = 10,000`) per Node.js process. Across $N$ instances behind a round-robin load balancer, the effective per-IP ceiling is up to $N \times \text{max}$ without introducing an external Redis network hop or single point of failure on every API request. At high multi-instance scale, pair with edge/WAF rate limiting (e.g., Cloud Armor) or an optional shared store.
+- **Process-Local Components & Production Global Enforcement:**
+  - **Rate Limiting (`createRateLimiter`):** By default (`RATE_LIMIT_MODE=process_local`), the middleware uses a bounded in-memory store (`InMemoryRateLimitStore`, `MAX_TRACKED_KEYS = 10,000`) scoped to a single Node.js process. **It is not a global rate limiter across multi-instance deployments**—across $N$ instances behind a load balancer, a client IP can issue up to $N \times \text{max}$ requests per window. For strict global enforcement in production (e.g., Google Cloud Run `cloudrun.service.yaml`), either configure edge/API gateway rate limiting (`RATE_LIMIT_MODE=edge_enforced` with Google Cloud Armor or Cloud API Gateway) or inject a shared `RateLimitStore` adapter (`RATE_LIMIT_MODE=shared_store` via `AppDependencies.rateLimitStore` / `RateLimitOptions.store`).
   - **Operational Metrics (`metricsCollector`):** Maintains bounded per-instance route counters (`MAX_ROUTE_BUCKETS = 100`) and live `pg.Pool` saturation telemetry (`max`, `totalCount`, `idleCount`, `waitingCount`, `activeCount`), while structured JSON logs on `stdout`/`stderr` are aggregated centrally across all instances.
 
 ### 2. Connection Pool Capacity Planning (`API Instances × DB_POOL_MAX`)
@@ -847,34 +848,34 @@ docker compose down
 
 ## Verification & Testing
 
-The repository enforces three-way database isolation (`Development DB ≠ Automated Test DB ≠ Production DB`) via programmatic guards (`assertSafeTestDatabaseUrl` and `assertSafeProductionDatabaseUrl`) and includes **242 automated tests across 16 suites**:
+The repository enforces three-way database isolation (`Development DB ≠ Automated Test DB ≠ Production DB`) via programmatic guards (`assertSafeTestDatabaseUrl` and `assertSafeProductionDatabaseUrl`) and separates the **default fast verification suite (`npm test` — 192 tests across 11 suites)** from the **extended PostgreSQL, scaling, Docker, deployment, and documentation suites (`npm run test:all` — 245 tests across 16 suites)**:
 
 ```bash
 # TypeScript strict type-checking (client + server)
 npm run lint
 
-# Fast unit, service-repository transaction, HTTP contract, validation, auth, RBAC, relational, pagination, security & observability suites (189 tests)
+# Default fast suite: unit, service-repository transaction, HTTP contract, validation, auth, RBAC, relational, pagination, security & observability suites (192 tests / 11 suites)
 npm test
 
-# Structured logging, X-Request-Id correlation, security event telemetry & metrics suite (10 tests)
+# Structured logging, X-Request-Id correlation, security event telemetry & metrics suite (10 tests — also included in npm test)
 npm run test:observability
 
-# Live PostgreSQL 15 integration suite against dedicated *_test database (22 tests)
+# Extended Suite 1: Live PostgreSQL 15 integration suite against dedicated *_test database (22 tests)
 npm run test:integration
 
-# Horizontal multi-instance scaling, pool telemetry, EXPLAIN index verification & 60-request concurrent load suite (8 tests)
+# Extended Suite 2: Horizontal multi-instance scaling, pool telemetry, EXPLAIN index verification & 60-request concurrent load suite (8 tests)
 npm run test:scaling
 
-# Multi-stage Docker runtime, non-root execution, read-only rootfs & SIGTERM suite (6 tests)
+# Extended Suite 3: Multi-stage Docker runtime, non-root execution, read-only rootfs & SIGTERM suite (6 tests)
 npm run test:docker
 
-# Production deployment, DB separation, migration idempotency & HTTPS/TLS live verification suite (5 tests)
+# Extended Suite 4: Production deployment, DB separation, migration idempotency & HTTPS/TLS live verification suite (5 tests)
 npm run test:deploy
 
-# OpenAPI 3.1 contract parity, public documentation completeness & end-to-end onboarding verification suite (12 tests)
+# Extended Suite 5: OpenAPI 3.1 contract parity, public documentation completeness & end-to-end onboarding verification suite (12 tests)
 npm run test:docs
 
-# Execute the complete 16-suite verification pyramid (242 tests)
+# Execute the complete 16-suite verification pyramid (192 default + 53 extended = 245 total tests)
 npm run test:all
 ```
 

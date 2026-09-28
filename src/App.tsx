@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Plus,
   Search,
@@ -173,6 +173,8 @@ function getStatusLabel(status: InvoiceStatus): string {
   }
 }
 
+const EMAIL_VALIDATION_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const CURRENCY_VALIDATION_REGEX = /^[A-Z]{3}$/;
 const SESSION_TOKEN_KEY = 'g7_billing_session_token';
 
 function parseJwtClaims(token: string): { sub?: string; iat?: number; exp?: number } | null {
@@ -223,6 +225,9 @@ export default function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [authSubmitting, setAuthSubmitting] = useState(false);
+  const authFormCardRef = useRef<HTMLDivElement | null>(null);
+  const authEmailInputRef = useRef<HTMLInputElement | null>(null);
+  const authPasswordInputRef = useRef<HTMLInputElement | null>(null);
 
   // Domain Data State
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -242,6 +247,7 @@ export default function App() {
 
   // Customer Create / Edit / Delete Modals
   const [customerModalMode, setCustomerModalMode] = useState<'create' | 'edit' | null>(null);
+  const [pendingInvoiceAfterCustomer, setPendingInvoiceAfterCustomer] = useState(false);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
   const [custName, setCustName] = useState('');
   const [custEmail, setCustEmail] = useState('');
@@ -263,7 +269,7 @@ export default function App() {
   });
   const [invNotes, setInvNotes] = useState('');
   const [invItems, setInvItems] = useState<DraftLineItem[]>([
-    { description: '', quantity: '1', unitPrice: '100.00' },
+    { description: '', quantity: '1', unitPrice: '' },
   ]);
   const [invFormError, setInvFormError] = useState<string | null>(null);
   const [invSubmitting, setInvSubmitting] = useState(false);
@@ -376,15 +382,48 @@ export default function App() {
     loadWorkspaceData(authToken);
   }, [authToken, loadWorkspaceData]);
 
-  // Sign In or Register
-  const handleAuthSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAuthSubmitting(true);
+  // Core Authentication Execution (Aligned with POST /api/v1/auth/register & POST /api/v1/auth/login)
+  const executeAuth = async (targetMode: 'login' | 'register') => {
+    if (authSubmitting) return;
+    setAuthMode(targetMode);
     setAuthError(null);
     setAuthNotice(null);
 
-    const trimmedEmail = authEmail.trim();
-    const endpoint = authMode === 'register' ? '/api/v1/auth/register' : '/api/v1/auth/login';
+    const trimmedEmail = authEmail.trim().toLowerCase();
+    if (!trimmedEmail) {
+      setAuthError('Please enter your email address.');
+      authEmailInputRef.current?.focus();
+      return;
+    }
+    if (trimmedEmail.length > 254 || !EMAIL_VALIDATION_REGEX.test(trimmedEmail)) {
+      setAuthError('Please enter a valid email address (for example, name@company.com).');
+      authEmailInputRef.current?.focus();
+      return;
+    }
+    if (!authPassword) {
+      setAuthError('Please enter your password.');
+      authPasswordInputRef.current?.focus();
+      return;
+    }
+    if (targetMode === 'register') {
+      if (authPassword.length < 8) {
+        setAuthError('Password must be at least 8 characters long to create an account.');
+        authPasswordInputRef.current?.focus();
+        return;
+      }
+      if (authPassword.length > 128 || authPassword.trim().length === 0) {
+        setAuthError('Password must be between 8 and 128 non-whitespace characters.');
+        authPasswordInputRef.current?.focus();
+        return;
+      }
+    } else if (authPassword.length > 128) {
+      setAuthError('Password cannot exceed 128 characters.');
+      authPasswordInputRef.current?.focus();
+      return;
+    }
+
+    setAuthSubmitting(true);
+    const endpoint = targetMode === 'register' ? '/api/v1/auth/register' : '/api/v1/auth/login';
 
     try {
       const res = await fetch(endpoint, {
@@ -397,6 +436,34 @@ export default function App() {
       });
 
       const json: ApiResponse<any> = await res.json();
+
+      // If registering an email that already exists, attempt login with the supplied credentials
+      if (targetMode === 'register' && res.status === 409) {
+        const loginAttempt = await fetch('/api/v1/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: trimmedEmail,
+            password: authPassword,
+          }),
+        });
+        const loginAttemptJson: ApiResponse<{ token: string; account: Account }> =
+          await loginAttempt.json();
+        if (loginAttempt.ok && loginAttemptJson.data?.token) {
+          setAuthToken(loginAttemptJson.data.token);
+          setCurrentAccount(loginAttemptJson.data.account);
+          sessionStorage.setItem(SESSION_TOKEN_KEY, loginAttemptJson.data.token);
+          setAuthPassword('');
+          return;
+        }
+        setAuthMode('login');
+        setAuthError(
+          'An account with this email already exists. Please verify your password and click Sign In.'
+        );
+        authPasswordInputRef.current?.focus();
+        return;
+      }
+
       if (!res.ok || json.status === 'error') {
         const msg =
           json.error?.fields?.map((f) => `${f.field}: ${f.message}`).join(', ') ||
@@ -406,8 +473,8 @@ export default function App() {
         return;
       }
 
-      if (authMode === 'register') {
-        // Automatically log the user in right after registration
+      if (targetMode === 'register') {
+        // Automatically sign the user in right after account creation
         const loginRes = await fetch('/api/v1/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -436,9 +503,46 @@ export default function App() {
         setAuthPassword('');
       }
     } catch (err: any) {
-      setAuthError(err.message || 'Network error while authenticating');
+      setAuthError(err.message || 'Network error while communicating with the server');
     } finally {
       setAuthSubmitting(false);
+    }
+  };
+
+  // Form onSubmit handler
+  const handleAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await executeAuth(authMode);
+  };
+
+  // Handler for header, hero, and tab "Create Account" / "Sign In" buttons
+  const handleAuthButtonClick = async (
+    targetMode: 'login' | 'register',
+    showPromptIfEmpty: boolean = false
+  ) => {
+    setAuthMode(targetMode);
+    setAuthError(null);
+
+    if (authEmail.trim().length > 0 && authPassword.length > 0) {
+      await executeAuth(targetMode);
+      return;
+    }
+
+    authFormCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (!authEmail.trim()) {
+      authEmailInputRef.current?.focus();
+    } else {
+      authPasswordInputRef.current?.focus();
+    }
+
+    if (showPromptIfEmpty) {
+      setAuthNotice(
+        targetMode === 'register'
+          ? 'Enter your email address and an 8+ character password below to create your account.'
+          : 'Enter your registered email address and password below to sign in.'
+      );
+    } else {
+      setAuthNotice(null);
     }
   };
 
@@ -452,7 +556,8 @@ export default function App() {
   };
 
   // Open Create Customer Modal
-  const openCreateCustomerModal = () => {
+  const openCreateCustomerModal = (chainToInvoice: boolean = false) => {
+    setPendingInvoiceAfterCustomer(chainToInvoice);
     setCustomerModalMode('create');
     setEditingCustomer(null);
     setCustName('');
@@ -463,6 +568,7 @@ export default function App() {
 
   // Open Edit Customer Modal
   const openEditCustomerModal = (customer: Customer) => {
+    setPendingInvoiceAfterCustomer(false);
     setCustomerModalMode('edit');
     setEditingCustomer(customer);
     setCustName(customer.name);
@@ -474,9 +580,31 @@ export default function App() {
   // Submit Create or Edit Customer
   const handleSaveCustomer = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!authToken) return;
-    setCustSubmitting(true);
+    if (!authToken || custSubmitting) return;
     setCustFormError(null);
+
+    const trimmedName = custName.trim();
+    const trimmedEmail = custEmail.trim().toLowerCase();
+    const normalizedCurrency = custCurrency.trim().toUpperCase();
+
+    if (!trimmedName) {
+      setCustFormError('Customer or company name is required.');
+      return;
+    }
+    if (trimmedName.length > 255) {
+      setCustFormError('Customer name cannot exceed 255 characters.');
+      return;
+    }
+    if (!trimmedEmail || trimmedEmail.length > 254 || !EMAIL_VALIDATION_REGEX.test(trimmedEmail)) {
+      setCustFormError('Please enter a valid customer billing email address.');
+      return;
+    }
+    if (!CURRENCY_VALIDATION_REGEX.test(normalizedCurrency)) {
+      setCustFormError('Currency must be a valid 3-letter uppercase ISO 4217 code (e.g. USD).');
+      return;
+    }
+
+    setCustSubmitting(true);
 
     const isEdit = customerModalMode === 'edit' && editingCustomer;
     const url = isEdit ? `/api/v1/customers/${editingCustomer.id}` : '/api/v1/customers';
@@ -490,9 +618,9 @@ export default function App() {
           Authorization: `Bearer ${authToken}`,
         },
         body: JSON.stringify({
-          name: custName.trim(),
-          email: custEmail.trim(),
-          currency: custCurrency.trim().toUpperCase(),
+          name: trimmedName,
+          email: trimmedEmail,
+          currency: normalizedCurrency,
         }),
       });
 
@@ -506,9 +634,26 @@ export default function App() {
         return;
       }
 
+      const createdOrUpdated = json.data;
+      const shouldOpenInvoice = pendingInvoiceAfterCustomer && !isEdit && createdOrUpdated;
+
       setCustomerModalMode(null);
       setEditingCustomer(null);
+      setPendingInvoiceAfterCustomer(false);
       await loadWorkspaceData(authToken);
+
+      if (shouldOpenInvoice && createdOrUpdated) {
+        setInvCustomerId(createdOrUpdated.id);
+        setInvStatus('issued');
+        setInvTax('0.00');
+        setInvDiscount('0.00');
+        const due = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+        setInvDueDate(due.toISOString().slice(0, 10));
+        setInvNotes('');
+        setInvItems([{ description: '', quantity: '1', unitPrice: '' }]);
+        setInvFormError(null);
+        setShowCreateInvoiceModal(true);
+      }
     } catch (err: any) {
       setCustFormError(err.message || 'Network error');
     } finally {
@@ -548,7 +693,7 @@ export default function App() {
   // Open Create Invoice Modal
   const openCreateInvoice = (preselectedCustomerId?: string) => {
     if (customers.length === 0) {
-      openCreateCustomerModal();
+      openCreateCustomerModal(true);
       return;
     }
     const defaultCustomerId = preselectedCustomerId || customers[0]?.id || '';
@@ -559,7 +704,7 @@ export default function App() {
     const due = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
     setInvDueDate(due.toISOString().slice(0, 10));
     setInvNotes('');
-    setInvItems([{ description: '', quantity: '1', unitPrice: '100.00' }]);
+    setInvItems([{ description: '', quantity: '1', unitPrice: '' }]);
     setInvFormError(null);
     setShowCreateInvoiceModal(true);
   };
@@ -592,20 +737,82 @@ export default function App() {
   // Submit Create Invoice
   const handleCreateInvoice = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!authToken) return;
-    setInvSubmitting(true);
+    if (!authToken || invSubmitting) return;
     setInvFormError(null);
 
-    try {
-      const parsedItems = invItems.map((item) => ({
-        description: item.description.trim(),
-        quantity: Number(item.quantity),
-        unitPrice: Number(item.unitPrice),
-      }));
+    if (!invCustomerId || !invCustomerId.startsWith('cus_')) {
+      setInvFormError('Please select a customer for this invoice.');
+      return;
+    }
 
-      const dueDateIso = invDueDate
-        ? new Date(`${invDueDate}T23:59:59.000Z`).toISOString()
-        : undefined;
+    if (invItems.length === 0 || invItems.length > 100) {
+      setInvFormError('Invoice must contain between 1 and 100 line items.');
+      return;
+    }
+
+    const parsedItems: Array<{ description: string; quantity: number; unitPrice: number }> = [];
+    for (let i = 0; i < invItems.length; i++) {
+      const raw = invItems[i];
+      const desc = raw.description.trim();
+      if (!desc) {
+        setInvFormError(`Line item #${i + 1}: Please enter a description.`);
+        return;
+      }
+      if (desc.length > 500) {
+        setInvFormError(`Line item #${i + 1}: Description cannot exceed 500 characters.`);
+        return;
+      }
+      const qty = Number(raw.quantity);
+      if (!Number.isInteger(qty) || qty < 1 || qty > 1_000_000) {
+        setInvFormError(`Line item #${i + 1}: Quantity must be a whole number between 1 and 1,000,000.`);
+        return;
+      }
+      if (raw.unitPrice.trim() === '') {
+        setInvFormError(`Line item #${i + 1}: Please enter a unit price.`);
+        return;
+      }
+      const price = Number(raw.unitPrice);
+      if (!Number.isFinite(price) || price < 0 || Math.abs(Math.round(price * 100) - price * 100) > 1e-6) {
+        setInvFormError(`Line item #${i + 1}: Unit price must be a non-negative amount with at most 2 decimal places.`);
+        return;
+      }
+      parsedItems.push({
+        description: desc,
+        quantity: qty,
+        unitPrice: Number(price.toFixed(2)),
+      });
+    }
+
+    const taxNum = Number(invTax || '0');
+    const discountNum = Number(invDiscount || '0');
+    if (!Number.isFinite(taxNum) || taxNum < 0) {
+      setInvFormError('Tax must be a non-negative amount.');
+      return;
+    }
+    if (!Number.isFinite(discountNum) || discountNum < 0) {
+      setInvFormError('Discount must be a non-negative amount.');
+      return;
+    }
+    if (!draftFinancialPreview.isValidTotal) {
+      setInvFormError('Discount cannot exceed invoice subtotal plus tax.');
+      return;
+    }
+
+    setInvSubmitting(true);
+
+    try {
+      let dueDateIso: string | undefined;
+      if (invDueDate) {
+        const candidateMs = Date.parse(`${invDueDate}T23:59:59.000Z`);
+        if (Number.isNaN(candidateMs)) {
+          setInvFormError('Please provide a valid due date.');
+          setInvSubmitting(false);
+          return;
+        }
+        // Ensure dueDate is never earlier than current server UTC issueDate when user picks today's local date
+        const minDueMs = Date.now() + 60_000;
+        dueDateIso = new Date(Math.max(candidateMs, minDueMs)).toISOString();
+      }
 
       const res = await fetch('/api/v1/invoices', {
         method: 'POST',
@@ -616,8 +823,8 @@ export default function App() {
         body: JSON.stringify({
           customerId: invCustomerId,
           status: invStatus,
-          tax: Number(invTax) || 0,
-          discount: Number(invDiscount) || 0,
+          tax: Number(taxNum.toFixed(2)),
+          discount: Number(discountNum.toFixed(2)),
           dueDate: dueDateIso,
           notes: invNotes.trim() ? invNotes.trim() : null,
           items: parsedItems,
@@ -797,14 +1004,14 @@ export default function App() {
             <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
               <button
                 type="button"
-                onClick={() => setAuthMode('login')}
+                onClick={() => handleAuthButtonClick('login', true)}
                 className="hover:text-slate-900 transition-colors whitespace-nowrap"
               >
                 Sign In
               </button>
               <button
                 type="button"
-                onClick={() => setAuthMode('register')}
+                onClick={() => handleAuthButtonClick('register', true)}
                 className="hover:text-slate-900 transition-colors whitespace-nowrap"
               >
                 Create Account
@@ -817,13 +1024,28 @@ export default function App() {
                 MIT License
               </button>
             </nav>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
-                className="min-h-[40px] px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap"
+                onClick={() => handleAuthButtonClick('login', true)}
+                className={`min-h-[40px] px-3.5 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap ${
+                  authMode === 'login'
+                    ? 'bg-slate-900 text-white hover:bg-slate-800'
+                    : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                }`}
               >
-                {authMode === 'login' ? 'Create Account' : 'Sign In'}
+                Sign In
+              </button>
+              <button
+                type="button"
+                onClick={() => handleAuthButtonClick('register', true)}
+                className={`min-h-[40px] px-3.5 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap ${
+                  authMode === 'register'
+                    ? 'bg-blue-600 text-white hover:bg-blue-700'
+                    : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                Create Account
               </button>
             </div>
           </div>
@@ -852,7 +1074,7 @@ export default function App() {
               <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
                 <button
                   type="button"
-                  onClick={() => setAuthMode('register')}
+                  onClick={() => handleAuthButtonClick('register', true)}
                   className="min-h-[48px] px-5 py-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm transition-colors flex items-center justify-center gap-2 whitespace-nowrap"
                 >
                   <span>Create Account</span>
@@ -860,8 +1082,15 @@ export default function App() {
                 </button>
                 <button
                   type="button"
+                  onClick={() => handleAuthButtonClick('login', true)}
+                  className="min-h-[48px] px-5 py-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 font-semibold text-sm transition-colors whitespace-nowrap"
+                >
+                  Sign In
+                </button>
+                <button
+                  type="button"
                   onClick={() => setShowLicenseModal(true)}
-                  className="min-h-[48px] px-5 py-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-medium text-sm transition-colors whitespace-nowrap"
+                  className="min-h-[48px] px-4 py-3 rounded-xl text-slate-600 hover:text-slate-900 font-medium text-sm transition-colors whitespace-nowrap"
                 >
                   View MIT License
                 </button>
@@ -890,15 +1119,14 @@ export default function App() {
             </div>
 
             {/* Right Sign In / Register Panel */}
-            <div className="lg:col-span-5 bg-white border border-slate-200 rounded-2xl p-6 sm:p-8">
+            <div
+              ref={authFormCardRef}
+              className="lg:col-span-5 bg-white border border-slate-200 rounded-2xl p-6 sm:p-8"
+            >
               <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg mb-6">
                 <button
                   type="button"
-                  onClick={() => {
-                    setAuthMode('login');
-                    setAuthError(null);
-                    setAuthNotice(null);
-                  }}
+                  onClick={() => handleAuthButtonClick('login', false)}
                   className={`flex-1 min-h-[40px] px-3 py-2 text-xs font-semibold rounded-md transition-colors whitespace-nowrap ${
                     authMode === 'login'
                       ? 'bg-white text-slate-900 shadow-xs'
@@ -909,11 +1137,7 @@ export default function App() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    setAuthMode('register');
-                    setAuthError(null);
-                    setAuthNotice(null);
-                  }}
+                  onClick={() => handleAuthButtonClick('register', false)}
                   className={`flex-1 min-h-[40px] px-3 py-2 text-xs font-semibold rounded-md transition-colors whitespace-nowrap ${
                     authMode === 'register'
                       ? 'bg-white text-slate-900 shadow-xs'
@@ -947,16 +1171,20 @@ export default function App() {
                 </div>
               )}
 
-              <form onSubmit={handleAuthSubmit} className="space-y-4">
+              <form noValidate onSubmit={handleAuthSubmit} className="space-y-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1.5">
                     Email Address
                   </label>
                   <input
+                    ref={authEmailInputRef}
                     type="email"
-                    required
+                    autoComplete="email"
                     value={authEmail}
-                    onChange={(e) => setAuthEmail(e.target.value)}
+                    onChange={(e) => {
+                      setAuthEmail(e.target.value);
+                      if (authError) setAuthError(null);
+                    }}
                     placeholder="you@company.com"
                     className="w-full min-h-[44px] px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent"
                   />
@@ -967,27 +1195,49 @@ export default function App() {
                     Password
                   </label>
                   <input
+                    ref={authPasswordInputRef}
                     type="password"
-                    required
-                    minLength={authMode === 'register' ? 8 : 1}
+                    autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
                     value={authPassword}
-                    onChange={(e) => setAuthPassword(e.target.value)}
-                    placeholder="Minimum 8 characters"
+                    onChange={(e) => {
+                      setAuthPassword(e.target.value);
+                      if (authError) setAuthError(null);
+                    }}
+                    placeholder={
+                      authMode === 'register' ? 'Minimum 8 characters' : 'Enter your password'
+                    }
                     className="w-full min-h-[44px] px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent"
                   />
                 </div>
 
-                <button
-                  type="submit"
-                  disabled={authSubmitting}
-                  className="w-full min-h-[46px] px-4 py-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold transition-colors disabled:opacity-50"
-                >
-                  {authSubmitting
-                    ? 'Please wait...'
-                    : authMode === 'login'
-                    ? 'Sign In to Dashboard'
-                    : 'Register & Sign In'}
-                </button>
+                <div className="pt-1 space-y-2.5">
+                  <button
+                    type="submit"
+                    disabled={authSubmitting}
+                    className="w-full min-h-[46px] px-4 py-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold transition-colors disabled:opacity-50"
+                  >
+                    {authSubmitting
+                      ? authMode === 'login'
+                        ? 'Signing In...'
+                        : 'Creating Account...'
+                      : authMode === 'login'
+                      ? 'Sign In'
+                      : 'Create Account'}
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={authSubmitting}
+                    onClick={() =>
+                      handleAuthButtonClick(authMode === 'login' ? 'register' : 'login', true)
+                    }
+                    className="w-full min-h-[42px] px-4 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold transition-colors disabled:opacity-50"
+                  >
+                    {authMode === 'login'
+                      ? 'New operator? Create Account'
+                      : 'Already registered? Sign In'}
+                  </button>
+                </div>
               </form>
             </div>
           </div>
@@ -1180,7 +1430,7 @@ export default function App() {
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={ openCreateCustomerModal }
+                onClick={() => openCreateCustomerModal(false)}
                 className="min-h-[40px] px-3 sm:px-4 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold transition-colors whitespace-nowrap"
               >
                 + Customer
@@ -1281,7 +1531,7 @@ export default function App() {
               <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto">
                 <button
                   type="button"
-                  onClick={openCreateCustomerModal}
+                  onClick={() => openCreateCustomerModal(false)}
                   className="flex-1 sm:flex-initial min-h-[44px] px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold transition-colors whitespace-nowrap"
                 >
                   + Create First Customer
@@ -1453,7 +1703,7 @@ export default function App() {
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={openCreateCustomerModal}
+                      onClick={() => openCreateCustomerModal(false)}
                       className="min-h-[40px] px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold transition-colors whitespace-nowrap"
                     >
                       + Add
@@ -1476,7 +1726,7 @@ export default function App() {
                     </p>
                     <button
                       type="button"
-                      onClick={openCreateCustomerModal}
+                      onClick={() => openCreateCustomerModal(false)}
                       className="min-h-[44px] px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold transition-colors"
                     >
                       + New Customer
@@ -1759,7 +2009,7 @@ export default function App() {
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={openCreateCustomerModal}
+                      onClick={() => openCreateCustomerModal(false)}
                       className="min-h-[44px] px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold flex items-center gap-2 transition-colors whitespace-nowrap"
                     >
                       <Plus className="w-4 h-4" />
@@ -2046,12 +2296,22 @@ export default function App() {
               </h3>
               <button
                 type="button"
-                onClick={() => setCustomerModalMode(null)}
+                onClick={() => {
+                  setCustomerModalMode(null);
+                  setPendingInvoiceAfterCustomer(false);
+                }}
                 className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {pendingInvoiceAfterCustomer && customerModalMode === 'create' && (
+              <div className="p-3 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-800">
+                Step 1 of 2: Create a customer record first — the New Invoice form will open
+                automatically once saved.
+              </div>
+            )}
 
             {custFormError && (
               <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700">
@@ -2059,7 +2319,7 @@ export default function App() {
               </div>
             )}
 
-            <form onSubmit={handleSaveCustomer} className="space-y-4">
+            <form noValidate onSubmit={handleSaveCustomer} className="space-y-4">
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1.5">
                   Customer or Company Name
@@ -2108,7 +2368,10 @@ export default function App() {
               <div className="pt-2 flex items-center justify-end gap-2">
                 <button
                   type="button"
-                  onClick={() => setCustomerModalMode(null)}
+                  onClick={() => {
+                    setCustomerModalMode(null);
+                    setPendingInvoiceAfterCustomer(false);
+                  }}
                   className="min-h-[44px] px-4 py-2 rounded-lg border border-slate-300 text-xs font-semibold text-slate-700 hover:bg-slate-50"
                 >
                   Cancel
@@ -2205,7 +2468,7 @@ export default function App() {
               </div>
             )}
 
-            <form onSubmit={handleCreateInvoice} className="space-y-5">
+            <form noValidate onSubmit={handleCreateInvoice} className="space-y-5">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="sm:col-span-1">
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
@@ -2265,7 +2528,7 @@ export default function App() {
                     onClick={() =>
                       setInvItems((prev) => [
                         ...prev,
-                        { description: '', quantity: '1', unitPrice: '50.00' },
+                        { description: '', quantity: '1', unitPrice: '' },
                       ])
                     }
                     className="min-h-[36px] px-3 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-xs font-semibold text-slate-800 transition-colors"
@@ -2324,7 +2587,7 @@ export default function App() {
                               min={0}
                               step="0.01"
                               required
-                              placeholder="Unit Price"
+                              placeholder="0.00"
                               value={item.unitPrice}
                               onChange={(e) => {
                                 const val = e.target.value;

@@ -66,6 +66,13 @@ spec:
             - name: CORS_ALLOWED_ORIGINS
               value: ""
             # Rate Limiting Configuration
+            # NOTE: The built-in Express rate limiter uses a bounded process-local store per container
+            # instance (with maxScale: 4, per-instance limits act as an instance-level safety ceiling
+            # of up to N * max across replicas). For strict global cross-instance enforcement in
+            # production, deploy behind Google Cloud Armor / Cloud API Gateway edge rate limiting
+            # (`RATE_LIMIT_MODE: "edge_enforced"`) or wire a shared `RateLimitStore` adapter.
+            - name: RATE_LIMIT_MODE
+              value: "edge_enforced"
             - name: AUTH_RATE_LIMIT_WINDOW_MS
               value: "60000"
             - name: AUTH_RATE_LIMIT_MAX

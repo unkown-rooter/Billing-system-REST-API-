@@ -2,8 +2,40 @@ import pg from 'pg';
 import 'dotenv/config';
 import { redactSensitiveText } from '../security/redaction.js';
 import { logger } from '../observability/logger.js';
+import { SecurityConfigurationError } from '../services/errors.js';
 
 const { Pool } = pg;
+
+export const INSECURE_DEV_DB_PASSWORDS = new Set([
+  'postgres_local_dev_only',
+  'password',
+  'changeme',
+  'MY_DB_PASSWORD',
+]);
+
+/**
+ * Validates that a production DATABASE_URL does not use known development-only
+ * or placeholder database passwords. Fails closed with `SecurityConfigurationError`.
+ */
+export function assertSafeProductionDatabaseCredentials(databaseUrl: string): void {
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(databaseUrl.trim());
+  } catch {
+    throw new SecurityConfigurationError(
+      'Production security error: DATABASE_URL is not a valid PostgreSQL connection URI'
+    );
+  }
+
+  if (parsedUrl.password) {
+    const decodedPassword = decodeURIComponent(parsedUrl.password);
+    if (INSECURE_DEV_DB_PASSWORDS.has(decodedPassword)) {
+      throw new SecurityConfigurationError(
+        'Production security error: DATABASE_URL cannot use a development-only or placeholder password in production'
+      );
+    }
+  }
+}
 
 export interface PoolConfig {
   connectionString?: string;
@@ -105,6 +137,8 @@ export function assertSafeProductionDatabaseUrl(
       'Production isolation violation: Production DATABASE_URL must not be identical to TEST_DATABASE_URL.'
     );
   }
+
+  assertSafeProductionDatabaseCredentials(prodDatabaseUrl);
 }
 
 let activePool: pg.Pool | null = null;

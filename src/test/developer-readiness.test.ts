@@ -188,6 +188,13 @@ describe('Billing System REST API - Phase 14 Developer Readiness, OpenAPI 3.1 & 
       assert.ok(!appTsx.includes('handleLaunchDemoWorkspace'), 'src/App.tsx must not contain mock workspace seeding');
       assert.ok(!appTsx.includes('sampleCustomers'), 'src/App.tsx must not contain hardcoded mock customers');
       assert.ok(!appTsx.includes('sampleInvoices'), 'src/App.tsx must not contain hardcoded mock invoices');
+      assert.ok(!appTsx.includes("unitPrice: '100.00'"), 'src/App.tsx must not pre-fill dummy unit prices');
+      assert.ok(!appTsx.includes("unitPrice: '50.00'"), 'src/App.tsx must not pre-fill dummy unit prices');
+      assert.ok(appTsx.includes('/api/v1/auth/register'), 'src/App.tsx must wire POST /api/v1/auth/register');
+      assert.ok(appTsx.includes('/api/v1/auth/login'), 'src/App.tsx must wire POST /api/v1/auth/login');
+      assert.ok(appTsx.includes('/api/v1/auth/me'), 'src/App.tsx must wire GET /api/v1/auth/me');
+      assert.ok(appTsx.includes('/api/v1/customers'), 'src/App.tsx must wire /api/v1/customers');
+      assert.ok(appTsx.includes('/api/v1/invoices'), 'src/App.tsx must wire /api/v1/invoices');
     });
   });
 

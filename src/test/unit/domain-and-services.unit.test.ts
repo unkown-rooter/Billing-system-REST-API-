@@ -24,7 +24,26 @@ import {
   validateInvoiceItemListQuery,
 } from '../../api/validation/query.schema.js';
 import { PasswordService } from '../../api/services/password.service.js';
-import { TokenService } from '../../api/services/token.service.js';
+import {
+  TokenService,
+  resolveAndValidateJwtExpiresIn,
+  DEFAULT_JWT_EXPIRES_IN_SECONDS,
+  MIN_JWT_EXPIRES_IN_SECONDS,
+  MAX_JWT_EXPIRES_IN_SECONDS,
+} from '../../api/services/token.service.js';
+import {
+  createRateLimiter,
+  resolveRateLimitMode,
+  InMemoryRateLimitStore,
+  RateLimitStore,
+  RateLimitBucket,
+} from '../../api/middlewares/rate-limit.middleware.js';
+import {
+  runMigrations,
+  MIGRATION_ADVISORY_LOCK_ID,
+  MigrationPool,
+  MigrationQueryClient,
+} from '../../api/db/migrate.js';
 import { AuthService } from '../../api/services/auth.service.js';
 import { CustomerService } from '../../api/services/customer.service.js';
 import { InvoiceService } from '../../api/services/invoice.service.js';
@@ -44,6 +63,8 @@ import {
   DatabaseError,
   PayloadTooLargeError,
   InternalServerError,
+  SecurityConfigurationError,
+  RateLimitExceededError,
 } from '../../api/services/errors.js';
 import { errorHandler } from '../../api/middlewares/error-handler.middleware.js';
 import { buildAccountFixture, assertSafeTestDatabaseUrl } from '../helpers/fixtures.js';
@@ -686,6 +707,220 @@ describe('Billing System REST API - Phase 8 Unit Test Suite (Domain, Validation,
       });
       assert.ok(!JSON.stringify(crashRes.body).includes('password_hash'));
       assert.ok(!JSON.stringify(crashRes.body).includes('/app/src'));
+    });
+  });
+
+  describe('7. JWT Expiration Configuration, Rate Limiter Store & Migration Advisory Lock Unit Tests', () => {
+    it('validates JWT_EXPIRES_IN and expiresInSeconds across missing, zero, negative, decimal, non-numeric, oversized, and valid values', () => {
+      // Missing value defaults to 86400 (24h) in both development/test and production
+      assert.equal(resolveAndValidateJwtExpiresIn(undefined, undefined, 'development'), DEFAULT_JWT_EXPIRES_IN_SECONDS);
+      assert.equal(resolveAndValidateJwtExpiresIn(undefined, undefined, 'test'), DEFAULT_JWT_EXPIRES_IN_SECONDS);
+      assert.equal(resolveAndValidateJwtExpiresIn(undefined, undefined, 'production'), DEFAULT_JWT_EXPIRES_IN_SECONDS);
+
+      // Valid boundary and typical integer values
+      assert.equal(resolveAndValidateJwtExpiresIn(MIN_JWT_EXPIRES_IN_SECONDS, undefined, 'production'), 1);
+      assert.equal(resolveAndValidateJwtExpiresIn(3600, undefined, 'development'), 3600);
+      assert.equal(resolveAndValidateJwtExpiresIn(MAX_JWT_EXPIRES_IN_SECONDS, undefined, 'production'), 2_592_000);
+      assert.equal(resolveAndValidateJwtExpiresIn(undefined, '1', 'production'), 1);
+      assert.equal(resolveAndValidateJwtExpiresIn(undefined, '86400', 'development'), 86400);
+      assert.equal(resolveAndValidateJwtExpiresIn(undefined, '2592000', 'production'), 2_592_000);
+
+      // Invalid numeric config values (zero, negative, decimal, NaN, Infinity, > max) fail closed with SecurityConfigurationError
+      const invalidNumbers = [0, -1, -86400, 1.5, 86400.25, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, MAX_JWT_EXPIRES_IN_SECONDS + 1, 99_999_999];
+      for (const badNum of invalidNumbers) {
+        for (const env of ['development', 'test', 'production']) {
+          assert.throws(
+            () => resolveAndValidateJwtExpiresIn(badNum, undefined, env),
+            SecurityConfigurationError,
+            `Expected expiresInSeconds=${String(badNum)} to throw SecurityConfigurationError in ${env}`
+          );
+          assert.throws(
+            () => new TokenService({ expiresInSeconds: badNum, nodeEnv: env, secret: 'unit-test-secret-key-minimum-32-characters-long' }),
+            SecurityConfigurationError
+          );
+        }
+      }
+
+      // Invalid environment variable strings (empty, zero, negative, decimal, non-numeric, trailing chars, oversized)
+      const invalidEnvStrings = ['', '   ', '0', '-1', '-3600', '3600.5', 'abc', '86400s', '1e5', 'NaN', 'Infinity', String(MAX_JWT_EXPIRES_IN_SECONDS + 1)];
+      for (const badEnv of invalidEnvStrings) {
+        for (const env of ['development', 'test', 'production']) {
+          assert.throws(
+            () => resolveAndValidateJwtExpiresIn(undefined, badEnv, env),
+            SecurityConfigurationError,
+            `Expected JWT_EXPIRES_IN="${badEnv}" to throw SecurityConfigurationError in ${env}`
+          );
+        }
+      }
+
+      // Generated tokens always contain valid finite integer iat and exp claims with exp = iat + expiresInSeconds
+      const service = new TokenService({
+        secret: 'unit-test-secret-key-minimum-32-characters-long',
+        expiresInSeconds: 1800,
+      });
+      const token = service.generateToken({ id: 'acc_jwt_claims', email: 'claims@billing.local', role: 'user' });
+      const verified = service.verifyToken(token);
+      assert.equal(typeof verified.iat, 'number');
+      assert.equal(typeof verified.exp, 'number');
+      assert.ok(Number.isFinite(verified.iat) && Number.isInteger(verified.iat));
+      assert.ok(Number.isFinite(verified.exp) && Number.isInteger(verified.exp));
+      assert.equal(verified.exp - verified.iat, 1800);
+    });
+
+    it('validates RateLimitMode and supports pluggable synchronous and asynchronous RateLimitStore adapters', async () => {
+      assert.equal(resolveRateLimitMode(undefined, undefined, undefined), 'process_local');
+      assert.equal(resolveRateLimitMode('process_local', undefined, undefined), 'process_local');
+      assert.equal(resolveRateLimitMode('edge_enforced', undefined, undefined), 'edge_enforced');
+
+      const customSyncStore = new InMemoryRateLimitStore(100);
+      assert.equal(resolveRateLimitMode('shared_store', customSyncStore, undefined), 'shared_store');
+      assert.equal(resolveRateLimitMode(undefined, customSyncStore, undefined), 'shared_store');
+
+      // shared_store without a store instance fails closed
+      assert.throws(
+        () => resolveRateLimitMode('shared_store', undefined, undefined),
+        SecurityConfigurationError
+      );
+
+      // Unrecognized rate limit mode fails closed
+      assert.throws(
+        () => resolveRateLimitMode('invalid_mode', undefined, undefined),
+        SecurityConfigurationError
+      );
+
+      // Verify async shared RateLimitStore integration point works seamlessly with createRateLimiter
+      const asyncCounters = new Map<string, RateLimitBucket>();
+      const asyncSharedStore: RateLimitStore = {
+        async increment(key: string, windowMs: number, nowMs: number = Date.now()): Promise<RateLimitBucket> {
+          const existing = asyncCounters.get(key);
+          if (!existing || nowMs >= existing.resetTimeMs) {
+            const bucket = { count: 1, resetTimeMs: nowMs + windowMs };
+            asyncCounters.set(key, bucket);
+            return bucket;
+          }
+          existing.count += 1;
+          return { count: existing.count, resetTimeMs: existing.resetTimeMs };
+        },
+      };
+
+      const limiter = createRateLimiter({
+        windowMs: 60_000,
+        max: 2,
+        keyPrefix: 'shared-test',
+        mode: 'shared_store',
+        store: asyncSharedStore,
+      });
+
+      const runMiddleware = (ip: string) =>
+        new Promise<{ headers: Record<string, string>; err?: unknown }>((resolve) => {
+          const headers: Record<string, string> = {};
+          const req = { ip, baseUrl: '/api/v1', path: '/customers', socket: { remoteAddress: ip } } as any;
+          const res = {
+            setHeader(name: string, value: string) {
+              headers[name] = value;
+            },
+          } as any;
+          limiter(req, res, (err?: unknown) => resolve({ headers, err }));
+        });
+
+      const first = await runMiddleware('203.0.113.10');
+      assert.equal(first.err, undefined);
+      assert.equal(first.headers['X-RateLimit-Limit'], '2');
+      assert.equal(first.headers['X-RateLimit-Remaining'], '1');
+
+      const second = await runMiddleware('203.0.113.10');
+      assert.equal(second.err, undefined);
+      assert.equal(second.headers['X-RateLimit-Remaining'], '0');
+
+      const third = await runMiddleware('203.0.113.10');
+      assert.ok(third.err instanceof RateLimitExceededError);
+    });
+
+    it('acquires and always releases PostgreSQL advisory lock around migrations on both success and failure paths', async () => {
+      // 1. Success path: acquires pg_advisory_lock and releases pg_advisory_unlock in finally block
+      const queriesSuccess: Array<{ sql: string; params?: unknown[] }> = [];
+      let releasedSuccess = false;
+      const mockSuccessClient: MigrationQueryClient = {
+        async query(sql: string, params?: unknown[]) {
+          queriesSuccess.push({ sql: sql.trim(), params });
+          if (sql.includes('SELECT name FROM schema_migrations')) {
+            return {
+              rows: [
+                { name: '001_create_customers_table.sql' },
+                { name: '002_create_accounts_table.sql' },
+                { name: '003_add_authorization_role_and_ownership.sql' },
+                { name: '004_create_invoices_and_items_tables.sql' },
+                { name: '005_add_pagination_and_filtering_indexes.sql' },
+                { name: '006_add_composite_scaling_indexes.sql' },
+              ],
+            } as any;
+          }
+          return { rows: [] } as any;
+        },
+        release() {
+          releasedSuccess = true;
+        },
+      };
+
+      const mockSuccessPool: MigrationPool = {
+        async connect() {
+          return mockSuccessClient;
+        },
+        async end() {},
+      };
+
+      const res = await runMigrations(undefined, { pool: mockSuccessPool });
+      assert.equal(res.applied.length, 0);
+      assert.equal(res.alreadyApplied.length, 6);
+      assert.equal(queriesSuccess[0].sql, 'SELECT pg_advisory_lock($1);');
+      assert.deepEqual(queriesSuccess[0].params, [MIGRATION_ADVISORY_LOCK_ID]);
+      const lastQuery = queriesSuccess[queriesSuccess.length - 1];
+      assert.equal(lastQuery.sql, 'SELECT pg_advisory_unlock($1);');
+      assert.deepEqual(lastQuery.params, [MIGRATION_ADVISORY_LOCK_ID]);
+      assert.equal(releasedSuccess, true);
+
+      // 2. Failure path: rolls back failed migration transaction, still releases pg_advisory_unlock & client, and rethrows original error
+      const queriesFailure: Array<{ sql: string; params?: unknown[] }> = [];
+      let releasedFailure = false;
+      const simulatedMigrationFailure = new Error('syntax error at or near "INVALID_SQL"');
+
+      const mockFailureClient: MigrationQueryClient = {
+        async query(sql: string, params?: unknown[]) {
+          const trimmed = sql.trim();
+          queriesFailure.push({ sql: trimmed, params });
+          if (trimmed.includes('SELECT name FROM schema_migrations')) {
+            return { rows: [] } as any;
+          }
+          if (trimmed.startsWith('-- 001') || trimmed.includes('CREATE TABLE IF NOT EXISTS customers')) {
+            throw simulatedMigrationFailure;
+          }
+          return { rows: [] } as any;
+        },
+        release() {
+          releasedFailure = true;
+        },
+      };
+
+      const mockFailurePool: MigrationPool = {
+        async connect() {
+          return mockFailureClient;
+        },
+        async end() {},
+      };
+
+      await assert.rejects(
+        async () => runMigrations(undefined, { pool: mockFailurePool, lockId: 999111 }),
+        (err: Error) => err === simulatedMigrationFailure
+      );
+
+      assert.equal(queriesFailure[0].sql, 'SELECT pg_advisory_lock($1);');
+      assert.deepEqual(queriesFailure[0].params, [999111]);
+      assert.ok(queriesFailure.some((q) => q.sql === 'BEGIN'));
+      assert.ok(queriesFailure.some((q) => q.sql === 'ROLLBACK'));
+      const unlockAfterFail = queriesFailure[queriesFailure.length - 1];
+      assert.equal(unlockAfterFail.sql, 'SELECT pg_advisory_unlock($1);');
+      assert.deepEqual(unlockAfterFail.params, [999111]);
+      assert.equal(releasedFailure, true);
     });
   });
 });

@@ -23,6 +23,7 @@ RUN npm install --no-audit --no-fund
 
 # Copy TypeScript configs, application source, and frontend entry points
 COPY tsconfig.json tsconfig.server.json vite.config.ts index.html server.ts ./
+COPY public ./public
 COPY src/api ./src/api
 COPY src/App.tsx src/main.tsx src/index.css ./src/
 
