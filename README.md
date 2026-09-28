@@ -916,4 +916,4 @@ The 14-phase core engineering roadmap is complete. Any future enhancements shoul
 
 ## License
 
-Distributed under the **MIT License**. See [`LICENSE`](./LICENSE) for full license text.
+Copyright (c) 2026 [G7 COMMUNITY]. Distributed under the **MIT License**. See [`LICENSE`](./LICENSE) for full license text.
