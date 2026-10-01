@@ -49,9 +49,11 @@ export function renderCloudRunService(template, env = process.env) {
   for (const [key, value] of Object.entries(values)) {
     rendered = rendered.replaceAll(key, value);
   }
+
   if (/__[A-Z0-9_]+__/.test(rendered)) {
     throw new Error('Cloud Run template contains unresolved placeholders.');
   }
+
   return rendered;
 }
 
@@ -60,6 +62,7 @@ function main() {
   if (!templatePath || !outputPath || extraArgs.length > 0) {
     throw new Error('Usage: node scripts/render-cloudrun.mjs <template.yaml> <output.yaml>');
   }
+
   const template = fs.readFileSync(path.resolve(templatePath), 'utf8');
   const rendered = renderCloudRunService(template);
   fs.writeFileSync(path.resolve(outputPath), rendered, { encoding: 'utf8', flag: 'wx', mode: 0o600 });

@@ -11,6 +11,7 @@
 [![OpenAPI](https://img.shields.io/badge/OpenAPI-3.1.0-6BA539?style=for-the-badge&logo=openapiinitiative&logoColor=white)](./openapi.yaml)
 [![Docker](https://img.shields.io/badge/Docker-Multi--Stage-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 [![Tests](https://img.shields.io/badge/Tests-195%20Default%20%7C%20248%20Total-10B981?style=for-the-badge&logo=checkmarx&logoColor=white)](#verification--testing)
+[![Release](https://img.shields.io/badge/GitHub%20Release-v1.0.0%20Active-10B981?style=for-the-badge&logo=github&logoColor=white)](https://github.com/unkown-rooter/Billing-system-REST-API-/releases/tag/v1.0.0)
 [![License](https://img.shields.io/badge/License-MIT-F59E0B?style=for-the-badge)](./LICENSE)
 
 [Overview](#project-description) •
@@ -883,16 +884,18 @@ npm run test:all
 
 ## Controlled v1.0.0 Release
 
-Publishing the source on GitHub does not require deploying or hosting the API. After the repository has been made public through the GitHub settings, the GitHub-only release path can create the source tag and release. It refuses to publish while the repository is private and requires an explicit confirmation:
+The public repository is online ([`unkown-rooter/Billing-system-REST-API-`](https://github.com/unkown-rooter/Billing-system-REST-API-)) and the **`v1.0.0` GitHub source release is active** ([`v1.0.0` Release](https://github.com/unkown-rooter/Billing-system-REST-API-/releases/tag/v1.0.0)).
+
+Publishing the source on GitHub does not require deploying or hosting the API. The GitHub-only release path (`--source-release`) verifies that the repository is public, the worktree is clean, and `npm ci`, `npm run lint`, and `npm test` pass before creating a release tag:
 
 ```bash
 npm run deploy:release -- --source-release
-# To actually create the GitHub source tag and release, from a clean, committed checkout
-# of the approved v1.0.0 source, after the repository is public:
+# To create a GitHub source tag and release from a clean, committed checkout
+# when the repository is public:
 CONFIRM_SOURCE_RELEASE=YES npm run deploy:release -- --source-release
 ```
 
-This source-only operation does not need GCP credentials and does not build/push a container, run database migrations, or deploy Cloud Run. The general `--preview` remains non-mutating. Cloud deployment, if chosen later, is a separate operation and requires the following inputs and explicit production confirmation:
+This source-only operation does not need GCP credentials and does not build/push a container, run database migrations, or deploy Cloud Run. The general `--preview` remains non-mutating. Cloud deployment, if chosen separately, requires the following inputs and explicit production confirmation:
 
 ```bash
 CONFIRM_PRODUCTION_RELEASE=YES CLOUD_ARMOR_READY=true \
@@ -907,13 +910,13 @@ CONFIRM_PRODUCTION_RELEASE=YES CLOUD_ARMOR_READY=true \
   npm run deploy:release -- --execute
 ```
 
-Before source release, the worktree must be clean and `HEAD` must equal the approved release commit. Cloud deployment additionally requires the Artifact Registry repository, Cloud SQL instance, secret versions, and IAM grants to exist. Secret values are read from Secret Manager, not from `.env` or command-line arguments. The database URL must use the chosen Cloud SQL connector/network mode. The external load balancer and Cloud Armor policy must already be configured. The deployment manifest restricts Cloud Run ingress to internal traffic and Cloud Load Balancing; deployment uses an immutable image digest and checks readiness through `PUBLIC_API_URL`. Cloud deployment has not been run or verified against a live GCP environment.
+Before source release, the worktree must be clean and `HEAD` must equal the approved release commit. Cloud deployment additionally requires the Artifact Registry repository, Cloud SQL instance, secret versions, and IAM grants to exist. Secret values are read from Secret Manager, not from `.env` or command-line arguments. The database URL must use the chosen Cloud SQL connector/network mode. The external load balancer and Cloud Armor policy must already be configured. The deployment manifest restricts Cloud Run ingress to internal traffic and Cloud Load Balancing; deployment uses an immutable image digest and checks readiness through `PUBLIC_API_URL`.
 
 ---
 
 ## Project Status
 
-**Status:** **Release preparation implemented; public GitHub release and live production readiness verification are pending**
+**Status:** **Public Repository Online & GitHub `v1.0.0` Release Active ([`v1.0.0`](https://github.com/unkown-rooter/Billing-system-REST-API-/releases/tag/v1.0.0)) — All 14 Engineering Phases Complete**
 
 | Phase | Capability Area | Status | Verification Coverage |
 |---|---|---|---|
@@ -931,7 +934,7 @@ Before source release, the worktree must be clean and `HEAD` must equal the appr
 | **Phase 12** | **Structured JSON Logging, Correlation IDs & Metrics** | Complete | `observability.test.ts` |
 | **Phase 13** | **Horizontal Scaling, Composite Indexing & Batched Writes** | Complete | `scaling.test.ts` |
 | **Phase 14** | **Developer Readiness & OpenAPI 3.1 Spec** | Complete | `developer-readiness.test.ts` |
-| **GitHub v1.0.0 Source Release** | **Public repository visibility and GitHub source release** | Pending owner approval | `scripts/deploy-release.sh --source-release` |
+| **GitHub v1.0.0** | **Public repository release** | Active / Online ([`v1.0.0`](https://github.com/unkown-rooter/Billing-system-REST-API-/releases/tag/v1.0.0)) | `scripts/deploy-release.sh --source-release`, `release-config.test.ts` |
 
 ---
 

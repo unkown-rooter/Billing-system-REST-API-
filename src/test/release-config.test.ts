@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process';
 const workspaceRoot = process.cwd();
 const rendererPath = path.join(workspaceRoot, 'scripts', 'render-cloudrun.mjs');
 const manifestPath = path.join(workspaceRoot, 'cloudrun.service.yaml');
+
 const renderEnv = {
   GCP_REGION: 'europe-west2',
   IMAGE_URI: `europe-west2-docker.pkg.dev/billing-system-prod/containers/billing-system-api@sha256:${'a'.repeat(64)}`,
@@ -28,7 +29,6 @@ describe('Cloud Run release configuration rendering', () => {
         stdio: 'pipe',
       });
       const rendered = fs.readFileSync(outputPath, 'utf8');
-
       assert.ok(rendered.includes(renderEnv.IMAGE_URI));
       assert.ok(rendered.includes(renderEnv.CLOUD_SQL_CONNECTION_NAME));
       assert.ok(rendered.includes(renderEnv.CLOUD_RUN_SERVICE_ACCOUNT));
@@ -70,7 +70,6 @@ describe('Cloud Run release configuration rendering', () => {
 
   it('requires explicit approval before attempting a GitHub source release', () => {
     const scriptPath = path.join(workspaceRoot, 'scripts', 'deploy-release.sh');
-
     assert.throws(
       () =>
         execFileSync('bash', [scriptPath, '--source-release'], {

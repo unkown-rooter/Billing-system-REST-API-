@@ -52,6 +52,7 @@ required_inputs=(
   JWT_SECRET_SECRET_NAME
   PUBLIC_API_URL
 )
+
 missing_inputs=()
 for input_name in "${required_inputs[@]}"; do
   if [ -z "${!input_name:-}" ]; then
